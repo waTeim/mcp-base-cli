@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
-    { name = "MCP Base Tools Contributors" }
+    { name = "MCP Base Contributors" }
 ]
 keywords = [
     "mcp",
@@ -65,7 +65,7 @@ Repository = "https://github.com/your-org/mcp-base.git"
 Issues = "https://github.com/your-org/mcp-base/issues"
 
 [project.scripts]
-mcp-base = "mcp_base_tools.cli:main"
+mcp-base = "mcp_base.cli:main"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -75,7 +75,7 @@ include = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_base_tools"]
+packages = ["src/mcp_base"]
 
 [tool.black]
 line-length = 100

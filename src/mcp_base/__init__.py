@@ -1,5 +1,5 @@
 """
-MCP Base Tools - CLI tools for MCP server setup and management.
+MCP Base - CLI tools for MCP server setup and management.
 
 This package provides command-line tools for:
 - Setting up Auth0 for MCP authentication (mcp-setup-auth0)
@@ -10,7 +10,7 @@ This package provides command-line tools for:
 """
 
 __version__ = "0.1.0"
-__author__ = "MCP Base Tools Contributors"
+__author__ = "MCP Base Contributors"
 
 __all__ = [
     "__version__",

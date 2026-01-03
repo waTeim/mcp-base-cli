@@ -48,7 +48,7 @@ def main():
     sys.argv = ["mcp-base setup-oidc"] + remaining
 
     if provider == "auth0":
-        from mcp_base_tools.setup_auth0 import main as auth0_main
+        from mcp_base.setup_auth0 import main as auth0_main
         auth0_main()
 
 

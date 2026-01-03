@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP Base Tools - Unified CLI
+MCP Base - Unified CLI
 
 Usage:
     mcp-base <command> [options]
@@ -81,23 +81,23 @@ Examples:
     sys.argv = [f"mcp-base {args.command}"] + remaining
 
     if args.command == "add-user":
-        from mcp_base_tools.add_user import main as cmd_main
+        from mcp_base.add_user import main as cmd_main
         cmd_main()
 
     elif args.command == "create-secrets":
-        from mcp_base_tools.create_secrets import main as cmd_main
+        from mcp_base.create_secrets import main as cmd_main
         cmd_main()
 
     elif args.command == "make-config":
-        from mcp_base_tools.make_config import main as cmd_main
+        from mcp_base.make_config import main as cmd_main
         cmd_main()
 
     elif args.command == "setup-oidc":
-        from mcp_base_tools.setup_oidc import main as cmd_main
+        from mcp_base.setup_oidc import main as cmd_main
         cmd_main()
 
     elif args.command == "setup-rbac":
-        from mcp_base_tools.setup_rbac import main as cmd_main
+        from mcp_base.setup_rbac import main as cmd_main
         cmd_main()
 
     else:

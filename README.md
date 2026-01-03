@@ -186,8 +186,8 @@ python -m build
 ```
 
 This creates:
-- `dist/mcp_base_tools-0.1.0.tar.gz` (source distribution)
-- `dist/mcp_base_tools-0.1.0-py3-none-any.whl` (wheel)
+- `dist/mcp_base-0.1.0.tar.gz` (source distribution)
+- `dist/mcp_base-0.1.0-py3-none-any.whl` (wheel)
 
 ### Test on Test PyPI (Recommended)
 
