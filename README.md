@@ -195,6 +195,9 @@ This creates:
 # Upload to Test PyPI
 python -m twine upload --repository testpypi dist/*
 
+# Or with a token file
+python -m twine upload --repository testpypi dist/* -u __token__ -p "$(cat ~/.testpypi-token)"
+
 # Test installation from Test PyPI
 pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ mcp-base
 ```
@@ -212,10 +215,28 @@ Instead of username/password, use API tokens:
 
 1. Go to PyPI > Account Settings > API tokens
 2. Create a token with scope "Entire account" or project-specific
-3. Use the token:
+3. Use the token directly:
    ```bash
    python -m twine upload dist/* -u __token__ -p pypi-YOUR_TOKEN_HERE
    ```
+
+#### Using a Token File
+
+For better security, store your token in a file and read it during upload:
+
+```bash
+# Store token in a file (do this once)
+echo "pypi-YOUR_TOKEN_HERE" > ~/.pypi-token
+chmod 600 ~/.pypi-token
+
+# Upload using the token file
+python -m twine upload dist/* -u __token__ -p "$(cat ~/.pypi-token)"
+
+# Or using environment variables
+TWINE_PASSWORD=$(cat ~/.pypi-token) python -m twine upload dist/*
+```
+
+#### Using .pypirc Configuration File
 
 Or create `~/.pypirc`:
 ```ini

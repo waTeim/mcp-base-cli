@@ -3,9 +3,11 @@
 Publish mcp-base to PyPI.
 
 Usage:
-    python publish.py          # Build and publish to Test PyPI (default)
-    python publish.py --prod   # Build and publish to production PyPI
-    python publish.py --build  # Build only, don't publish
+    python publish.py                                 # Build and publish to Test PyPI (default)
+    python publish.py --prod                          # Build and publish to production PyPI
+    python publish.py --build                         # Build only, don't publish
+    python publish.py --token-file /path/to/token     # Publish with token from file
+    python publish.py --prod --token-file /path/to/token  # Publish to prod with token file
 """
 
 import argparse
@@ -15,9 +17,19 @@ import sys
 from pathlib import Path
 
 
-def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+def run(cmd: list[str], check: bool = True, mask_token: bool = False) -> subprocess.CompletedProcess:
     """Run a command and return the result."""
-    print(f"  $ {' '.join(cmd)}")
+    if mask_token:
+        # Mask the token in the output
+        masked_cmd = []
+        for i, part in enumerate(cmd):
+            if i > 0 and cmd[i-1] == "-p":
+                masked_cmd.append("***")
+            else:
+                masked_cmd.append(part)
+        print(f"  $ {' '.join(masked_cmd)}")
+    else:
+        print(f"  $ {' '.join(cmd)}")
     return subprocess.run(cmd, check=check)
 
 
@@ -34,6 +46,11 @@ def main():
         "--build",
         action="store_true",
         help="Build only, don't publish"
+    )
+    parser.add_argument(
+        "--token-file",
+        type=str,
+        help="Path to file containing PyPI API token"
     )
     args = parser.parse_args()
 
@@ -65,6 +82,23 @@ def main():
         print("\n✅ Build complete. Packages are in dist/")
         return
 
+    # Read token from file if specified
+    token = None
+    if args.token_file:
+        token_path = Path(args.token_file).expanduser()
+        if not token_path.exists():
+            print(f"\n❌ Error: Token file not found: {token_path}")
+            sys.exit(1)
+        try:
+            token = token_path.read_text().strip()
+            if not token:
+                print(f"\n❌ Error: Token file is empty: {token_path}")
+                sys.exit(1)
+            print(f"\n🔑 Using token from: {token_path}")
+        except Exception as e:
+            print(f"\n❌ Error reading token file: {e}")
+            sys.exit(1)
+
     # Confirm before publishing to production
     if args.prod:
         print("\n⚠️  WARNING: You are about to publish to PRODUCTION PyPI!")
@@ -78,14 +112,27 @@ def main():
 
     # Publish
     print(f"\n🚀 Publishing to {repository}...")
+
+    # Build upload command
+    upload_cmd = [sys.executable, "-m", "twine", "upload"]
     if repository == "testpypi":
-        run([sys.executable, "-m", "twine", "upload", "--repository", "testpypi", "dist/*"])
+        upload_cmd.extend(["--repository", "testpypi"])
+
+    # Add token authentication if provided
+    if token:
+        upload_cmd.extend(["-u", "__token__", "-p", token])
+
+    upload_cmd.append("dist/*")
+
+    # Run the upload (mask token in output if present)
+    run(upload_cmd, mask_token=bool(token))
+
+    if repository == "testpypi":
         print("\n✅ Published to Test PyPI!")
         print("\nTo install from Test PyPI:")
         print("  pip install --index-url https://test.pypi.org/simple/ \\")
         print("      --extra-index-url https://pypi.org/simple/ mcp-base")
     else:
-        run([sys.executable, "-m", "twine", "upload", "dist/*"])
         print("\n✅ Published to PyPI!")
         print("\nTo install:")
         print("  pip install mcp-base")
