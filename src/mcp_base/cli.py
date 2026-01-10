@@ -8,7 +8,6 @@ Usage:
 Commands:
     add-user        Add users to allowed clients
     create-secrets  Create Kubernetes secrets for MCP deployment
-    make-config     Generate configuration files
     setup-oidc      Set up OIDC provider (Auth0, etc.)
     setup-rbac      Set up Kubernetes RBAC resources
 """
@@ -26,7 +25,6 @@ def main():
 Commands:
   add-user        Add users to allowed clients in your OIDC provider
   create-secrets  Create Kubernetes secrets for MCP deployment
-  make-config     Generate configuration files (auth0-config.json, helm-values.yaml, .env)
   setup-oidc      Set up OIDC provider for MCP authentication
   setup-rbac      Set up Kubernetes RBAC resources
 
@@ -49,12 +47,6 @@ Examples:
     subparsers.add_parser(
         "create-secrets",
         help="Create Kubernetes secrets for MCP deployment",
-        add_help=False
-    )
-
-    subparsers.add_parser(
-        "make-config",
-        help="Generate configuration files",
         add_help=False
     )
 
@@ -86,10 +78,6 @@ Examples:
 
     elif args.command == "create-secrets":
         from mcp_base.create_secrets import main as cmd_main
-        cmd_main()
-
-    elif args.command == "make-config":
-        from mcp_base.make_config import main as cmd_main
         cmd_main()
 
     elif args.command == "setup-oidc":

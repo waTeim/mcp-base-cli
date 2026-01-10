@@ -37,7 +37,6 @@ mcp-base <command> [options]
 |---------|-------------|
 | `setup-oidc` | Set up OIDC provider (Auth0, etc.) for MCP authentication |
 | `create-secrets` | Create Kubernetes secrets for MCP deployment |
-| `make-config` | Generate configuration files |
 | `setup-rbac` | Set up Kubernetes RBAC resources |
 | `add-user` | Add users to allowed clients |
 
@@ -72,24 +71,6 @@ mcp-base create-secrets --namespace default --release-name my-mcp-server --dry-r
 
 # Replace existing secrets
 mcp-base create-secrets --namespace default --release-name my-mcp-server --force
-```
-
-### Generating Configuration Files
-
-Generate configuration files for deployment:
-
-```bash
-# Interactive mode
-mcp-base make-config --server-name "My MCP Server"
-
-# Non-interactive with environment variables
-mcp-base make-config --server-name "My Server" --from-env
-
-# Specify values directly
-mcp-base make-config --server-name "My Server" \
-    --domain your-tenant.auth0.com \
-    --client-id xxx \
-    --client-secret yyy
 ```
 
 ### Setting Up RBAC
