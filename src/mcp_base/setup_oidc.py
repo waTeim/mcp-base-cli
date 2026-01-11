@@ -5,17 +5,29 @@ MCP Server - OIDC Provider Setup
 Sets up an OIDC provider for MCP authentication.
 
 Currently supported providers:
-- auth0: Auth0 (https://auth0.com)
+- auth0: Auth0 (https://auth0.com) - full automated setup
+- dex: Dex (https://dexidp.io) - pre-configured client credentials
+- generic: Any pre-configured OIDC provider (Keycloak, Okta, etc.)
 
 Usage:
+    # Auth0 (automated setup)
     mcp-base setup-oidc --provider auth0 --domain your-tenant.auth0.com
-    mcp-base setup-oidc --provider auth0 --token YOUR_TOKEN
+
+    # Dex or other pre-configured provider
+    mcp-base setup-oidc --provider dex --issuer https://dex.example.com \\
+        --audience https://mcp-server.example.com/mcp \\
+        --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
+
+    # Generic OIDC provider
+    mcp-base setup-oidc --provider generic --issuer https://your-idp.com \\
+        --audience https://mcp-server.example.com/mcp \\
+        --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
 """
 
 import sys
 
 
-SUPPORTED_PROVIDERS = ["auth0"]
+SUPPORTED_PROVIDERS = ["auth0", "dex", "generic", "keycloak", "okta"]
 
 
 def main():
@@ -50,6 +62,13 @@ def main():
     if provider == "auth0":
         from mcp_base.setup_auth0 import main as auth0_main
         auth0_main()
+
+    elif provider in ("dex", "generic", "keycloak", "okta"):
+        from mcp_base.setup_generic import main as generic_main
+        # Set provider name for generic module
+        if "--provider-name" not in sys.argv:
+            sys.argv.extend(["--provider-name", provider])
+        generic_main()
 
 
 if __name__ == "__main__":

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-base"
-version = "0.1.0"
-description = "CLI tools for MCP (Model Context Protocol) server setup and management"
+version = "0.3.0"
+description = "CLI tools for MCP (Model Context Protocol) server setup and management with OIDC support (Auth0, Dex, Keycloak)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
@@ -15,7 +15,10 @@ authors = [
 keywords = [
     "mcp",
     "model-context-protocol",
+    "oidc",
     "auth0",
+    "dex",
+    "keycloak",
     "kubernetes",
     "cli",
     "devops"
@@ -72,10 +75,15 @@ include = [
     "/src",
     "/README.md",
     "/LICENSE",
+    "/CLAUDE.md",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_base"]
+
+# Ensure all Python files and py.typed marker are included
+[tool.hatch.build.targets.wheel.force-include]
+"src/mcp_base/py.typed" = "mcp_base/py.typed"
 
 [tool.black]
 line-length = 100

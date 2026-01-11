@@ -108,11 +108,11 @@ class KubernetesSecretCreator:
             return 'default'
 
     def load_config(self, config_file: str) -> Dict[str, Any]:
-        """Load configuration from auth0-config.json."""
+        """Load configuration from auth0-config.json or oidc-config.json."""
         if not os.path.exists(config_file):
             print(f"Error: Configuration file not found: {config_file}")
             print("\nRun the setup script first:")
-            print("  python setup-auth0.py")
+            print("  mcp-base setup-oidc --provider <provider>")
             sys.exit(1)
 
         print(f"Loading {config_file}...")
@@ -290,8 +290,8 @@ Secrets Created:
     )
     parser.add_argument(
         "--config-file",
-        help="Path to auth0-config.json file (default: ./auth0-config.json)",
-        default="./auth0-config.json"
+        help="Path to config file (auto-detects auth0-config.json or oidc-config.json)",
+        default=None
     )
     parser.add_argument(
         "--dry-run",
@@ -316,6 +316,19 @@ Secrets Created:
 
     args = parser.parse_args()
 
+    # Auto-detect config file if not specified
+    if args.config_file is None:
+        if os.path.exists("./oidc-config.json"):
+            args.config_file = "./oidc-config.json"
+        elif os.path.exists("./auth0-config.json"):
+            args.config_file = "./auth0-config.json"
+        else:
+            print("Error: No configuration file found")
+            print("  Looking for: ./oidc-config.json or ./auth0-config.json")
+            print("\nRun the setup script first:")
+            print("  mcp-base setup-oidc --provider <provider>")
+            sys.exit(1)
+
     print("=" * 70)
     print("Kubernetes Secret Creator for MCP Server")
     print("=" * 70)
@@ -331,22 +344,38 @@ Secrets Created:
 
     auth_config = creator.load_config(args.config_file)
 
-    required_keys = ['domain', 'issuer', 'audience', 'management_api', 'connection_id']
-    missing = [key for key in required_keys if key not in auth_config]
+    # Detect provider type from config
+    provider_type = auth_config.get('provider', 'auth0')  # Default to auth0 for backward compatibility
+    is_auth0 = provider_type == 'auth0' or 'domain' in auth_config
 
-    if missing:
-        print(f"Error: Missing required configuration: {', '.join(missing)}")
-        print("\nRun the setup script first:")
-        print("  python setup-auth0.py")
-        sys.exit(1)
+    if is_auth0:
+        # Auth0-specific validation
+        required_keys = ['domain', 'issuer', 'audience', 'management_api', 'connection_id']
+        missing = [key for key in required_keys if key not in auth_config]
 
-    mgmt_api = auth_config.get('management_api', {})
-    if not mgmt_api.get('client_secret'):
-        print("\nWarning: Management client secret is empty")
-        proceed = input("\nContinue anyway? (y/N): ")
-        if proceed.lower() != 'y':
-            print("Aborted.")
-            sys.exit(0)
+        if missing:
+            print(f"Error: Missing required configuration: {', '.join(missing)}")
+            print("\nRun the setup script first:")
+            print("  mcp-base setup-oidc --provider auth0")
+            sys.exit(1)
+
+        mgmt_api = auth_config.get('management_api', {})
+        if not mgmt_api.get('client_secret'):
+            print("\nWarning: Management client secret is empty")
+            proceed = input("\nContinue anyway? (y/N): ")
+            if proceed.lower() != 'y':
+                print("Aborted.")
+                sys.exit(0)
+    else:
+        # Generic OIDC validation
+        required_keys = ['issuer', 'audience', 'server_client']
+        missing = [key for key in required_keys if key not in auth_config]
+
+        if missing:
+            print(f"Error: Missing required configuration: {', '.join(missing)}")
+            print("\nRun the setup script first:")
+            print(f"  mcp-base setup-oidc --provider {provider_type}")
+            sys.exit(1)
 
     print()
     print("=" * 70)
@@ -361,33 +390,58 @@ Secrets Created:
     server_client_id = server_client.get('client_id', '')
     server_client_secret = server_client.get('client_secret', '')
 
-    mgmt_secret = mgmt_api.get('client_secret', '')
-    mgmt_client_id = mgmt_api.get('client_id', '')
+    # Build secret data based on provider type
+    if is_auth0:
+        mgmt_api = auth_config.get('management_api', {})
+        mgmt_secret = mgmt_api.get('client_secret', '')
+        mgmt_client_id = mgmt_api.get('client_id', '')
 
-    mgmt_data = {
-        'server-client-id': server_client_id,
-        'server-client-secret': server_client_secret,
-        'mgmt-client-id': mgmt_client_id,
-        'mgmt-client-secret': mgmt_secret,
-        'auth0-domain': auth_config['domain'],
-        'connection-id': auth_config['connection_id'],
-    }
+        mgmt_data = {
+            'server-client-id': server_client_id,
+            'server-client-secret': server_client_secret,
+            'mgmt-client-id': mgmt_client_id,
+            'mgmt-client-secret': mgmt_secret,
+            'auth0-domain': auth_config['domain'],
+            'connection-id': auth_config['connection_id'],
+        }
 
-    print("Secret to create:")
-    print()
-    print(f"{args.release_name}-auth0-credentials (Organized credentials)")
-    print("   Server Client Credentials (for FastMCP server):")
-    print(f"     - server-client-id: {mgmt_data.get('server-client-id', 'N/A')}")
-    print(f"     - server-client-secret: {'***hidden***' if mgmt_data.get('server-client-secret') else '***empty***'}")
-    print()
-    print("   Management API Credentials (for setup scripts):")
-    print(f"     - mgmt-client-id: {mgmt_data.get('mgmt-client-id', 'N/A')}")
-    print(f"     - mgmt-client-secret: {'***hidden***' if mgmt_data.get('mgmt-client-secret') else '***empty***'}")
-    print()
-    print("   Common Configuration:")
-    print(f"     - auth0-domain: {mgmt_data.get('auth0-domain', 'N/A')}")
-    print(f"     - connection-id: {mgmt_data.get('connection-id', 'N/A')}")
-    print()
+        print("Secret to create:")
+        print()
+        print(f"{args.release_name}-auth0-credentials (Auth0 credentials)")
+        print("   Server Client Credentials (for FastMCP server):")
+        print(f"     - server-client-id: {mgmt_data.get('server-client-id', 'N/A')}")
+        print(f"     - server-client-secret: {'***hidden***' if mgmt_data.get('server-client-secret') else '***empty***'}")
+        print()
+        print("   Management API Credentials (for setup scripts):")
+        print(f"     - mgmt-client-id: {mgmt_data.get('mgmt-client-id', 'N/A')}")
+        print(f"     - mgmt-client-secret: {'***hidden***' if mgmt_data.get('mgmt-client-secret') else '***empty***'}")
+        print()
+        print("   Common Configuration:")
+        print(f"     - auth0-domain: {mgmt_data.get('auth0-domain', 'N/A')}")
+        print(f"     - connection-id: {mgmt_data.get('connection-id', 'N/A')}")
+        print()
+        secret_name = f"{args.release_name}-auth0-credentials"
+    else:
+        # Generic OIDC - simpler structure
+        mgmt_data = {
+            'server-client-id': server_client_id,
+            'server-client-secret': server_client_secret,
+            'issuer': auth_config['issuer'],
+            'audience': auth_config['audience'],
+        }
+
+        print("Secret to create:")
+        print()
+        print(f"{args.release_name}-oidc-credentials ({provider_type.upper()} credentials)")
+        print("   Server Client Credentials (for MCP server):")
+        print(f"     - server-client-id: {mgmt_data.get('server-client-id', 'N/A')}")
+        print(f"     - server-client-secret: {'***hidden***' if mgmt_data.get('server-client-secret') else '***empty***'}")
+        print()
+        print("   OIDC Configuration:")
+        print(f"     - issuer: {mgmt_data.get('issuer', 'N/A')}")
+        print(f"     - audience: {mgmt_data.get('audience', 'N/A')}")
+        print()
+        secret_name = f"{args.release_name}-oidc-credentials"
 
     if not args.dry_run:
         proceed = input("Proceed with secret creation? (y/N): ")
@@ -398,12 +452,12 @@ Secrets Created:
     print()
 
     success = True
-    secret_name = f"{args.release_name}-auth0-credentials"
 
+    component_label = "auth0-credentials" if is_auth0 else "oidc-credentials"
     if not creator.create_secret(
         name=secret_name,
         data=mgmt_data,
-        labels={"component": "auth0-credentials"},
+        labels={"component": component_label},
         replace=args.force
     ):
         success = False
@@ -445,7 +499,8 @@ Secrets Created:
         print("Next Steps:")
         print()
         print("1. Secrets created:")
-        print(f"   {secret_name} (Auth0 credentials)")
+        cred_type = "Auth0" if is_auth0 else f"{provider_type.upper()} OIDC"
+        print(f"   {secret_name} ({cred_type} credentials)")
         print(f"   {jwt_secret_name} (JWT signing key + storage encryption key)")
         print()
         print("2. Deploy your MCP server:")

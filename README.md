@@ -35,14 +35,18 @@ mcp-base <command> [options]
 
 | Command | Description |
 |---------|-------------|
-| `setup-oidc` | Set up OIDC provider (Auth0, etc.) for MCP authentication |
+| `setup-oidc` | Set up OIDC provider (Auth0, Dex, Keycloak, etc.) for MCP authentication |
 | `create-secrets` | Create Kubernetes secrets for MCP deployment |
 | `setup-rbac` | Set up Kubernetes RBAC resources |
 | `add-user` | Add users to allowed clients |
 
-### Setting Up OIDC (Auth0)
+### Setting Up OIDC
 
-Configure your OIDC provider for MCP authentication:
+Configure your OIDC provider for MCP authentication. Two modes are supported:
+
+#### Auth0 (Automated Setup)
+
+For Auth0, the CLI can automatically configure your tenant:
 
 ```bash
 # Set up Auth0 (first run)
@@ -57,6 +61,34 @@ mcp-base setup-oidc --provider auth0
 # Force recreate clients (if secrets are lost)
 mcp-base setup-oidc --provider auth0 --recreate-client
 ```
+
+#### Dex, Keycloak, or Generic OIDC (Pre-configured)
+
+For pre-configured OIDC providers (Dex, Keycloak, Okta, etc.) where you already have client credentials:
+
+```bash
+# Interactive mode (prompts for values)
+mcp-base setup-oidc --provider dex
+
+# Non-interactive mode
+mcp-base setup-oidc --provider dex \
+    --issuer https://dex.example.com \
+    --audience https://mcp-server.example.com/mcp \
+    --client-id YOUR_CLIENT_ID \
+    --client-secret YOUR_CLIENT_SECRET
+
+# Generic OIDC provider
+mcp-base setup-oidc --provider generic \
+    --issuer https://your-idp.com \
+    --audience https://mcp-server.example.com/mcp \
+    --client-id YOUR_CLIENT_ID \
+    --client-secret YOUR_CLIENT_SECRET
+```
+
+**Required Redirect URLs (configure in your IdP):**
+- MCP Server: `https://mcp-server.example.com/auth/callback`
+- Claude Desktop: `https://claude.ai/api/mcp/auth_callback`
+- Local testing: `http://localhost:8888/callback`, `http://localhost:8889/callback`
 
 ### Creating Kubernetes Secrets
 
