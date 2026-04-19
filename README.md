@@ -42,11 +42,23 @@ mcp-base <command> [options]
 
 ### Setting Up OIDC
 
-Configure your OIDC provider for MCP authentication. Two modes are supported:
+Configure your OIDC provider for MCP authentication.
 
-#### Auth0 (Automated Setup)
+**Supported providers:** `auth0`, `dex`, `keycloak`, `okta`, `generic`
 
-For Auth0, the CLI can automatically configure your tenant:
+To see all provider options and examples:
+```bash
+mcp-base setup-oidc --help
+```
+
+To get help for a specific provider:
+```bash
+mcp-base setup-oidc --provider dex --help
+```
+
+**1. Auth0 (Automated Setup)**
+
+The CLI automatically configures your Auth0 tenant:
 
 ```bash
 # Set up Auth0 (first run)
@@ -62,9 +74,9 @@ mcp-base setup-oidc --provider auth0
 mcp-base setup-oidc --provider auth0 --recreate-client
 ```
 
-#### Dex, Keycloak, or Generic OIDC (Pre-configured)
+**2. Dex, Keycloak, Okta, or Generic OIDC (Pre-configured)**
 
-For pre-configured OIDC providers (Dex, Keycloak, Okta, etc.) where you already have client credentials:
+For providers where you already have client credentials configured:
 
 ```bash
 # Interactive mode (prompts for values)
@@ -77,7 +89,21 @@ mcp-base setup-oidc --provider dex \
     --client-id YOUR_CLIENT_ID \
     --client-secret YOUR_CLIENT_SECRET
 
-# Generic OIDC provider
+# Keycloak
+mcp-base setup-oidc --provider keycloak \
+    --issuer https://keycloak.example.com/realms/myrealm \
+    --audience https://mcp-server.example.com/mcp \
+    --client-id YOUR_CLIENT_ID \
+    --client-secret YOUR_CLIENT_SECRET
+
+# Okta
+mcp-base setup-oidc --provider okta \
+    --issuer https://your-org.okta.com \
+    --audience https://mcp-server.example.com/mcp \
+    --client-id YOUR_CLIENT_ID \
+    --client-secret YOUR_CLIENT_SECRET
+
+# Any generic OIDC provider
 mcp-base setup-oidc --provider generic \
     --issuer https://your-idp.com \
     --audience https://mcp-server.example.com/mcp \
@@ -85,10 +111,12 @@ mcp-base setup-oidc --provider generic \
     --client-secret YOUR_CLIENT_SECRET
 ```
 
-**Required Redirect URLs (configure in your IdP):**
-- MCP Server: `https://mcp-server.example.com/auth/callback`
-- Claude Desktop: `https://claude.ai/api/mcp/auth_callback`
-- Local testing: `http://localhost:8888/callback`, `http://localhost:8889/callback`
+**Required Redirect URLs**
+
+Configure these redirect URLs in your OIDC provider:
+- **MCP Server**: `https://mcp-server.example.com/auth/callback` (replace with your actual server URL)
+- **Claude Desktop**: `https://claude.ai/api/mcp/auth_callback`
+- **Local testing** (optional): `http://localhost:8888/callback`, `http://localhost:8889/callback`
 
 ### Creating Kubernetes Secrets
 

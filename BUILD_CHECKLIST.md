@@ -1,4 +1,4 @@
-# Pre-Publishing Checklist for mcp-base v0.2.0
+# Pre-Publishing Checklist for mcp-base v0.3.0
 
 ## ✅ Package Configuration
 - [x] Version bumped to 0.2.0 in pyproject.toml
@@ -30,7 +30,7 @@
 
 ### Source Distribution (.tar.gz)
 ```
-mcp_base-0.2.0.tar.gz
+mcp_base-0.3.0.tar.gz
 ├── src/mcp_base/
 │   ├── __init__.py
 │   ├── cli.py
@@ -50,7 +50,7 @@ mcp_base-0.2.0.tar.gz
 
 ### Wheel Distribution (.whl)
 ```
-mcp_base-0.2.0-py3-none-any.whl
+mcp_base-0.3.0-py3-none-any.whl
 └── mcp_base/
     ├── __init__.py
     ├── cli.py
@@ -113,7 +113,7 @@ pip install --upgrade mcp-base
 
 # Verify version
 pip show mcp-base | grep Version
-# Should show: Version: 0.2.0
+# Should show: Version: 0.3.0
 
 # Test new providers
 mcp-base setup-oidc --provider dex --help
@@ -123,7 +123,7 @@ mcp-base setup-oidc --provider generic --help
 mcp-base --help
 ```
 
-## 📝 Release Notes for v0.2.0
+## 📝 Release Notes for v0.3.0
 
 ### New Features
 - Added support for Dex OIDC provider
@@ -135,12 +135,21 @@ mcp-base --help
 - Automatic redirect URL display for manual IdP configuration
 
 ### Enhanced
+- **Help System**: `mcp-base setup-oidc --help` now shows all providers instead of Auth0-only
+- Comprehensive help with usage examples for all 5 providers
+- Clear error messages with helpful suggestions
 - `create-secrets` command now supports both Auth0 and generic OIDC configurations
 - Updated documentation with examples for all supported providers
 
+### UX Improvements
+- Provider option is now clearly documented in help
+- Required redirect URLs shown in help output
+- Better error messages when provider is missing or invalid
+- Provider-specific help accessible via `--provider <name> --help`
+
 ### Files Changed
 - NEW: `src/mcp_base/setup_generic.py`
-- UPDATED: `src/mcp_base/setup_oidc.py`
+- UPDATED: `src/mcp_base/setup_oidc.py` (major help system overhaul)
 - UPDATED: `src/mcp_base/create_secrets.py`
 - UPDATED: `README.md`
 - UPDATED: `CLAUDE.md`
