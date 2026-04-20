@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-base"
-version = "0.4.0"
+version = "0.5.0"
 description = "CLI tools for MCP (Model Context Protocol) server setup and management with OIDC support (Auth0, Dex, Keycloak)"
 readme = "README.md"
 license = "MIT"

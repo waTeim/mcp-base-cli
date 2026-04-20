@@ -46,6 +46,13 @@ Configure your OIDC provider for MCP authentication.
 
 **Supported providers:** `auth0`, `dex`, `keycloak`, `okta`, `generic`
 
+Each provider resolves to one of two authentication **patterns** (see [`imp/cli-integration-contract.md`](imp/cli-integration-contract.md) §1):
+
+| Pattern | Providers | How it works | Needs pre-registered client | Needs K8s Secrets |
+|---|---|---|---|---|
+| **A — OAuth Proxy** | `auth0`, `dex`, `okta`, `generic` | FastMCP runs an OAuth Proxy in front of the IdP | yes | yes (`<release>-oidc-credentials` + `<release>-jwt-signing-key`) |
+| **B — Remote DCR** | `keycloak` (≥ 26.6.0 + FastMCP ≥ 3.2.4) | FastMCP's `KeycloakAuthProvider` uses Keycloak's native Dynamic Client Registration | no | no (`create-secrets` is a no-op) |
+
 To see all provider options and examples:
 ```bash
 mcp-base setup-oidc --help
@@ -89,13 +96,12 @@ mcp-base setup-oidc --provider dex \
     --client-id YOUR_CLIENT_ID \
     --client-secret YOUR_CLIENT_SECRET
 
-# Keycloak — see keycloak-client-howto.md for full client setup.
-# NOTE: Requires FastMCP >= 3.2.4 on the MCP server AND Keycloak >= 26.6.0 on the IdP.
+# Keycloak (Pattern B — native DCR). See KEYCLOAK-HOWTO.md for realm/DCR setup.
+# Requires FastMCP >= 3.2.4 on the MCP server AND Keycloak >= 26.6.0 on the IdP.
+# No --client-id / --client-secret are required; any that are passed are ignored.
 mcp-base setup-oidc --provider keycloak \
     --issuer https://keycloak.example.com/realms/myrealm \
-    --audience https://mcp-server.example.com/mcp \
-    --client-id YOUR_CLIENT_ID \
-    --client-secret YOUR_CLIENT_SECRET
+    --audience https://mcp-server.example.com/mcp
 
 # Okta
 mcp-base setup-oidc --provider okta \
@@ -143,6 +149,12 @@ mcp-base create-secrets --namespace default --release-name my-mcp-server --dry-r
 # Replace existing secrets
 mcp-base create-secrets --namespace default --release-name my-mcp-server --force
 ```
+
+**Pattern A** (`auth0`, `dex`, `okta`, `generic`) creates two Secrets:
+- `<release-name>-oidc-credentials` — client ID/secret (+ Auth0 mgmt fields when applicable)
+- `<release-name>-jwt-signing-key` — JWT signing key + storage encryption key
+
+**Pattern B** (`keycloak` native DCR): `create-secrets` is a no-op. It reads `oidc-config.json`, sees `pattern: "remote"`, prints a notice, and exits `0` without contacting the Kubernetes API.
 
 ### Setting Up RBAC
 

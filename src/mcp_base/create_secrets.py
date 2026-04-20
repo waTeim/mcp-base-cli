@@ -38,6 +38,22 @@ except ImportError:
     sys.exit(1)
 
 
+def _peek_config(config_file: str) -> Dict[str, Any]:
+    """Read a config file just enough to decide pattern; never exits on failure.
+
+    Used so Pattern B (Keycloak) can short-circuit before we try to connect to
+    a Kubernetes cluster.
+    """
+    if not os.path.exists(config_file):
+        return {}
+    try:
+        with open(config_file, 'r') as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def generate_jwt_signing_key() -> str:
     """Generate a secure 256-bit JWT signing key."""
     return secrets.token_hex(32)
@@ -269,14 +285,16 @@ Examples:
   # Force replace existing secrets
   python create-secrets.py --namespace default --release-name my-release --force
 
-Secrets Created:
-  1. <release-name>-auth0-credentials
-     - server-client-id: Server client ID (for FastMCP)
-     - server-client-secret: Server client secret (for FastMCP)
-     - mgmt-client-id: Management API client ID (for scripts)
-     - mgmt-client-secret: Management API client secret (for scripts)
-     - auth0-domain: Auth0 domain
-     - connection-id: Auth0 connection ID
+Patterns (imp/cli-integration-contract.md §1):
+  Pattern A (auth0, dex, okta, generic) — creates 2 Secrets.
+  Pattern B (keycloak ≥ 26.6.0)         — no-op, exits 0.
+
+Pattern A Secrets:
+  1. <release-name>-oidc-credentials
+     - server-client-id: Server client ID (for FastMCP OAuth Proxy)
+     - server-client-secret: Server client secret
+     - mgmt-client-id / mgmt-client-secret / auth0-domain / connection-id
+       (Auth0 path only)
 
   2. <release-name>-jwt-signing-key
      - jwt-signing-key: JWT signing key for MCP tokens (256-bit hex)
@@ -334,6 +352,19 @@ Secrets Created:
     print("=" * 70)
     print()
 
+    # Pattern B (Keycloak ≥ 26.6.0 native DCR) requires no Kubernetes secrets.
+    # Check this BEFORE connecting to Kubernetes so the command is a true no-op
+    # on hosts without a kubeconfig. See imp/cli-integration-contract.md §5.3.
+    preview = _peek_config(args.config_file)
+    provider_type = preview.get('provider', 'auth0')
+    pattern = preview.get('pattern') or ("remote" if provider_type == "keycloak" else "proxy")
+    if pattern == "remote":
+        print("Pattern B detected (Keycloak native DCR).")
+        print("No Kubernetes secrets are required — FastMCP's KeycloakAuthProvider")
+        print("registers clients dynamically and verifies tokens against JWKS.")
+        print("Nothing to do. Exiting.")
+        sys.exit(0)
+
     creator = KubernetesSecretCreator(
         namespace=args.namespace,
         app_name=args.app_name,
@@ -344,8 +375,8 @@ Secrets Created:
 
     auth_config = creator.load_config(args.config_file)
 
-    # Detect provider type from config
-    provider_type = auth_config.get('provider', 'auth0')  # Default to auth0 for backward compatibility
+    # Re-derive from the fully-loaded config (preview is just for the early exit).
+    provider_type = auth_config.get('provider', 'auth0')
     is_auth0 = provider_type == 'auth0' or 'domain' in auth_config
 
     if is_auth0:
@@ -407,7 +438,7 @@ Secrets Created:
 
         print("Secret to create:")
         print()
-        print(f"{args.release_name}-auth0-credentials (Auth0 credentials)")
+        print(f"{args.release_name}-oidc-credentials (Auth0 credentials)")
         print("   Server Client Credentials (for FastMCP server):")
         print(f"     - server-client-id: {mgmt_data.get('server-client-id', 'N/A')}")
         print(f"     - server-client-secret: {'***hidden***' if mgmt_data.get('server-client-secret') else '***empty***'}")
@@ -420,7 +451,9 @@ Secrets Created:
         print(f"     - auth0-domain: {mgmt_data.get('auth0-domain', 'N/A')}")
         print(f"     - connection-id: {mgmt_data.get('connection-id', 'N/A')}")
         print()
-        secret_name = f"{args.release_name}-auth0-credentials"
+        # Pattern A standardizes on <release>-oidc-credentials regardless of
+        # provider (see imp/cli-integration-contract.md §5.1, §8 step 6).
+        secret_name = f"{args.release_name}-oidc-credentials"
     else:
         # Generic OIDC - simpler structure
         mgmt_data = {
@@ -453,7 +486,7 @@ Secrets Created:
 
     success = True
 
-    component_label = "auth0-credentials" if is_auth0 else "oidc-credentials"
+    component_label = "oidc-credentials"
     if not creator.create_secret(
         name=secret_name,
         data=mgmt_data,

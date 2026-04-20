@@ -997,6 +997,8 @@ def save_output_files(
 
         # auth0-config.json - single source of truth
         config = {
+            "provider": "auth0",
+            "pattern": "proxy",  # Auth0 is always Pattern A (OAuth Proxy)
             "domain": domain,
             "issuer": f"https://{domain}",
             "audience": api_identifier,
@@ -1057,12 +1059,16 @@ image:
 # Number of replicas
 replicaCount: 1
 
-# FastMCP OAuth Proxy Configuration for Auth0
+# FastMCP OAuth Proxy Configuration for Auth0 (Pattern A)
 # The MCP server uses FastMCP's built-in OAuth Proxy which:
 # - Receives Auth0 tokens internally (may be JWE encrypted)
 # - Issues MCP-signed JWT tokens to clients (NOT Auth0 tokens)
 # - Manages session binding between Auth0 and MCP tokens
 oidc:
+  # Authentication type — drives Pattern A vs Pattern B chart branches.
+  # See imp/cli-integration-contract.md §4.
+  authType: "auth0"
+
   # Auth0 issuer URL (domain)
   issuer: "https://{domain}"
 
@@ -1075,13 +1081,21 @@ oidc:
   clientId: "{server_client_id}"
 
   # NOTE: Client secret is automatically loaded from Kubernetes secret
-  #   Secret name: <release-name>-auth0-credentials
+  #   Secret name: <release-name>-oidc-credentials
   #   Secret key: server-client-secret
   # Create the secret with:
-  #   python bin/create_secrets.py --namespace <namespace> --release-name <release-name>
+  #   mcp-base create-secrets --namespace <namespace> --release-name <release-name>
 
   # Optional: Uncomment if you need to override JWKS URI
   # jwksUri: "https://{domain}/.well-known/jwks.json"
+
+# Redis subchart — required for Pattern A OAuth session persistence.
+redis:
+  enabled: true
+
+# JWT signing key Secret — required for Pattern A.
+jwt:
+  enabled: true
 
 # Service configuration
 service:

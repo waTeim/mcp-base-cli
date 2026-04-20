@@ -40,6 +40,18 @@ from urllib.parse import urlparse
 DEFAULT_CONFIG_FILE = "oidc-config.json"
 
 
+def pattern_for_provider(provider_name: str) -> str:
+    """Return the DCR pattern a provider uses.
+
+    "remote" means FastMCP talks to the IdP's native DCR (Keycloak ≥ 26.6.0);
+    no local client secret, no Redis, no JWT signing key are needed.
+    "proxy" means FastMCP runs its own OAuth Proxy in front of the IdP and
+    requires a pre-registered confidential client, Redis, and a JWT signing key.
+    Defined in imp/cli-integration-contract.md §1.
+    """
+    return "remote" if provider_name == "keycloak" else "proxy"
+
+
 def fallback_endpoints(issuer: str, provider_name: str) -> Dict[str, str]:
     """Provider-specific endpoint paths used when OIDC discovery is unavailable.
 
@@ -170,8 +182,8 @@ class GenericOIDCSetup:
         self,
         issuer: str,
         audience: str,
-        client_id: str,
-        client_secret: str,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
         provider_name: str = "generic",
         validate: bool = True
     ) -> None:
@@ -181,12 +193,13 @@ class GenericOIDCSetup:
         Args:
             issuer: OIDC issuer URL (e.g., https://dex.example.com)
             audience: API audience/identifier (e.g., https://mcp-server.example.com/mcp)
-            client_id: OAuth client ID
-            client_secret: OAuth client secret
+            client_id: OAuth client ID (Pattern A only; ignored for Keycloak)
+            client_secret: OAuth client secret (Pattern A only; ignored for Keycloak)
             provider_name: Provider name (generic, dex, keycloak, etc.)
             validate: Whether to validate the issuer
         """
-        print(f"\n🔧 Setting up {provider_name.upper()} OIDC provider for MCP")
+        pattern = pattern_for_provider(provider_name)
+        print(f"\n🔧 Setting up {provider_name.upper()} OIDC provider for MCP (pattern: {pattern})")
         print("=" * 70)
 
         # Clean and validate inputs
@@ -202,16 +215,26 @@ class GenericOIDCSetup:
         # Show required redirect URLs
         self.show_redirect_urls(audience)
 
-        # Build configuration
+        # Build configuration. Per imp/cli-integration-contract.md §3, Pattern B
+        # (Keycloak) omits the server_client block entirely because FastMCP's
+        # KeycloakAuthProvider uses Keycloak's native DCR.
         config: Dict[str, Any] = {
             "provider": provider_name,
+            "pattern": pattern,
             "issuer": issuer,
             "audience": audience,
-            "server_client": {
-                "client_id": client_id,
-                "client_secret": client_secret
-            }
         }
+
+        if pattern == "proxy":
+            config["server_client"] = {
+                "client_id": client_id or "",
+                "client_secret": client_secret or "",
+            }
+        elif client_id or client_secret:
+            print(
+                "\n⚠️  --client-id / --client-secret are ignored for Keycloak "
+                "(Pattern B uses native DCR). Not written to oidc-config.json."
+            )
 
         if discovery:
             config["authorization_endpoint"] = discovery["authorization_endpoint"]
@@ -229,20 +252,56 @@ class GenericOIDCSetup:
         print("\n✅ Setup complete!")
         print(f"\nNext steps:")
         print(f"1. Ensure the redirect URLs above are configured in your {provider_name} provider")
-        print(f"2. Create Kubernetes secrets:")
-        print(f"   mcp-base create-secrets --namespace <namespace> --release-name <release-name>")
-        print(f"3. Deploy using Helm:")
-        print(f"   helm install mcp-server ./chart -f oidc-values.yaml")
+        if pattern == "proxy":
+            print(f"2. Create Kubernetes secrets:")
+            print(f"   mcp-base create-secrets --namespace <namespace> --release-name <release-name>")
+            print(f"3. Deploy using Helm:")
+            print(f"   helm install mcp-server ./chart -f oidc-values.yaml")
+        else:
+            print(f"2. Pattern B (Keycloak native DCR) — no Kubernetes credentials secret needed.")
+            print(f"3. Deploy using Helm:")
+            print(f"   helm install mcp-server ./chart -f oidc-values.yaml")
 
     def generate_helm_values(self, config: Dict[str, Any], audience: str) -> None:
-        """Generate Helm values file for deployment."""
+        """Generate Helm values file for deployment.
+
+        Shape follows imp/cli-integration-contract.md §4. oidc.authType, redis.enabled,
+        and jwt.enabled are always emitted explicitly so the chart can branch on pattern
+        without relying on defaults.
+        """
         issuer = config["issuer"]
-        client_id = config["server_client"]["client_id"]
         provider_name = config.get("provider", "generic")
+        pattern = config.get("pattern", pattern_for_provider(provider_name))
+        auth_type = "keycloak" if provider_name == "keycloak" else "oidc"
+        is_proxy = pattern == "proxy"
+        server_client = config.get("server_client", {}) if is_proxy else {}
+        client_id = server_client.get("client_id", "")
 
         # Extract hostname from audience URL for ingress
         parsed = urlparse(audience)
         ingress_host = parsed.netloc or "mcp-api.example.com"
+
+        if is_proxy:
+            pattern_block = f"""  # OAuth client ID for MCP server (Pattern A — OAuth Proxy)
+  clientId: "{client_id}"
+
+  # NOTE: Client secret is automatically loaded from Kubernetes secret
+  #   Secret name: <release-name>-oidc-credentials
+  #   Secret key: server-client-secret
+  # Create the secret with:
+  #   mcp-base create-secrets --namespace <namespace> --release-name <release-name>
+
+  # Optional: Override JWKS URI if needed
+  # jwksUri: "{issuer}/.well-known/jwks.json"
+"""
+        else:
+            pattern_block = """  # Pattern B — FastMCP's KeycloakAuthProvider uses Keycloak native DCR.
+  # No pre-registered client, no client secret, no Kubernetes credentials secret.
+  requiredScopes: ["openid"]
+"""
+
+        redis_enabled = "true" if is_proxy else "false"
+        jwt_enabled = "true" if is_proxy else "false"
 
         helm_values = f"""# Helm Values for MCP Server with {provider_name.upper()} OIDC
 # Generated by mcp-base setup-oidc --provider {provider_name}
@@ -259,23 +318,25 @@ replicaCount: 1
 
 # OIDC Configuration
 oidc:
-  # OIDC issuer URL
+  # Authentication type — drives Pattern A vs Pattern B chart branches.
+  # See imp/cli-integration-contract.md §4.
+  authType: "{auth_type}"
+
+  # OIDC issuer URL (Keycloak: realm URL)
   issuer: "{issuer}"
 
   # API audience (identifier)
   audience: "{audience}"
 
-  # OAuth client ID for MCP server
-  clientId: "{client_id}"
+{pattern_block}
+# Redis subchart — required for Pattern A OAuth session persistence;
+# MUST be disabled for Pattern B (Keycloak native DCR).
+redis:
+  enabled: {redis_enabled}
 
-  # NOTE: Client secret is automatically loaded from Kubernetes secret
-  #   Secret name: <release-name>-oidc-credentials
-  #   Secret key: server-client-secret
-  # Create the secret with:
-  #   mcp-base create-secrets --namespace <namespace> --release-name <release-name>
-
-  # Optional: Override JWKS URI if needed
-  # jwksUri: "{issuer}/.well-known/jwks.json"
+# JWT signing key Secret — Pattern A only.
+jwt:
+  enabled: {jwt_enabled}
 
 # Service configuration
 service:
@@ -474,20 +535,35 @@ Required Redirect URLs (configure in your IdP):
         existing_value=existing_config.get("audience")
     )
 
-    client_id = args.client_id or get_env_or_prompt(
-        "OIDC_CLIENT_ID",
-        "OAuth Client ID",
-        required=True,
-        existing_value=server_client.get("client_id")
-    )
+    pattern = pattern_for_provider(args.provider_name)
 
-    client_secret = args.client_secret or get_env_or_prompt(
-        "OIDC_CLIENT_SECRET",
-        "OAuth Client Secret",
-        required=True,
-        secret=True,
-        existing_value=server_client.get("client_secret")
-    )
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+
+    if pattern == "proxy":
+        client_id = args.client_id or get_env_or_prompt(
+            "OIDC_CLIENT_ID",
+            "OAuth Client ID",
+            required=True,
+            existing_value=server_client.get("client_id")
+        )
+
+        client_secret = args.client_secret or get_env_or_prompt(
+            "OIDC_CLIENT_SECRET",
+            "OAuth Client Secret",
+            required=True,
+            secret=True,
+            existing_value=server_client.get("client_secret")
+        )
+    else:
+        # Pattern B (Keycloak native DCR) — no pre-registered client needed.
+        if args.client_id or args.client_secret:
+            print(
+                "\nℹ️  --client-id / --client-secret are not used for Keycloak "
+                "(Pattern B: native DCR). They will not be persisted."
+            )
+        client_id = args.client_id
+        client_secret = args.client_secret
 
     # Run setup
     setup.setup(

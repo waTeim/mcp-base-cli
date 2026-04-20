@@ -44,9 +44,21 @@ PROVIDER OPTION (required):
   --provider, -p {auth0,dex,keycloak,okta,generic}
                         Choose OIDC provider type
 
+AUTH PATTERNS (imp/cli-integration-contract.md §1):
+  Pattern A (OAuth Proxy)  auth0, dex, okta, generic
+    FastMCP runs a proxy in front of the IdP. Requires a pre-registered
+    confidential client, Redis (session store), and a JWT signing key.
+    create-secrets writes <release>-oidc-credentials + <release>-jwt-signing-key.
+
+  Pattern B (Remote DCR)   keycloak (requires Keycloak ≥ 26.6.0
+                                      and FastMCP ≥ 3.2.4 on the server)
+    FastMCP's KeycloakAuthProvider uses Keycloak's native Dynamic Client
+    Registration. No pre-registered client, no Redis, no JWT signing key,
+    no Kubernetes credentials Secret. create-secrets is a no-op.
+
 SUPPORTED PROVIDERS:
 
-  auth0                 Auth0 - Automated tenant configuration
+  auth0                 Pattern A — Automated Auth0 tenant configuration
                         • Automatically creates/updates OIDC applications
                         • Configures Resource Server (API)
                         • Sets up Dynamic Client Registration (DCR)
@@ -61,7 +73,7 @@ SUPPORTED PROVIDERS:
                         For Auth0-specific options, run:
                           mcp-base setup-oidc --provider auth0 --help
 
-  dex                   Dex - Pre-configured client credentials
+  dex                   Pattern A — Pre-configured client credentials
                         • Uses existing Dex client configuration
                         • Validates OIDC discovery endpoints
                         • Displays required redirect URLs
@@ -76,20 +88,26 @@ SUPPORTED PROVIDERS:
                         For Dex-specific options, run:
                           mcp-base setup-oidc --provider dex --help
 
-  keycloak              Keycloak - Pre-configured client credentials
-                        Same as 'dex' but optimized for Keycloak naming
+  keycloak              Pattern B — Keycloak (≥ 26.6.0) native DCR
+                        No --client-id / --client-secret required; any that
+                        are passed are ignored and not persisted.
+
+                        Usage:
+                          mcp-base setup-oidc --provider keycloak \\
+                            --issuer https://keycloak.example.com/realms/myrealm \\
+                            --audience https://mcp-server.example.com/mcp
 
                         For Keycloak-specific options, run:
                           mcp-base setup-oidc --provider keycloak --help
 
-  okta                  Okta - Pre-configured client credentials
-                        Same as 'dex' but optimized for Okta naming
+  okta                  Pattern A — Pre-configured client credentials
+                        Same wiring as 'dex' but defaults tuned for Okta.
 
                         For Okta-specific options, run:
                           mcp-base setup-oidc --provider okta --help
 
-  generic               Generic OIDC - Any standard OIDC provider
-                        Works with any OIDC-compliant identity provider
+  generic               Pattern A — Any standard OIDC provider
+                        Works with any OIDC-compliant identity provider.
 
                         For generic OIDC options, run:
                           mcp-base setup-oidc --provider generic --help

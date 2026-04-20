@@ -68,6 +68,17 @@ Token files (`test.token`, `prod.token`) contain a raw PyPI API token on a singl
 
 This section is written for automated agents invoking `mcp-base`. Prefer these patterns over the interactive flows in `README.md`.
 
+**Authoritative source**: `imp/cli-integration-contract.md` defines the wire format between this CLI, the `mcp-base` Helm chart, and scaffolded MCP servers (filenames, Secret layout, ConfigMap shape, mount paths). Read it first if an artifact is under review.
+
+### Authentication patterns
+
+Every provider resolves to exactly one pattern. The CLI writes a `pattern` field into `oidc-config.json` / `auth0-config.json`; downstream commands branch on it.
+
+| Pattern | Providers | FastMCP class | Pre-registered client | Redis | JWT key | K8s Secrets |
+|---|---|---|---|---|---|---|
+| `proxy` (A) | `auth0`, `dex`, `okta`, `generic` | `Auth0Provider` / `OIDCAuthProvider` | required | required | required | `<release>-oidc-credentials` + `<release>-jwt-signing-key` |
+| `remote` (B) | `keycloak` (≥ 26.6.0 + FastMCP ≥ 3.2.4) | `KeycloakAuthProvider` | **no** | **no** | **no** | **none** (create-secrets is a no-op) |
+
 ### Non-interactive invocation rules
 - Every subcommand prompts when stdin is a TTY and a required value is missing. To guarantee non-interactive behavior, pass every required flag explicitly or set the documented env var.
 - Fatal errors exit with status `1` and print to stdout (not stderr). Check the exit code, not the output text.
@@ -80,14 +91,19 @@ This section is written for automated agents invoking `mcp-base`. Prefer these p
 Required: `--domain`, `--api-identifier`, `--token` (or env `AUTH0_MGMT_TOKEN`).
 Side effects: creates/updates Auth0 Resource Server, M2M client, server client, grants. `--recreate-client` forces client recreation if secrets are lost.
 
-**`setup-oidc --provider {dex,keycloak,okta,generic}`** (writes `oidc-config.json`)
+**`setup-oidc --provider {dex,okta,generic}`** — Pattern A (writes `oidc-config.json`)
 Required: `--issuer`, `--audience`, `--client-id`, `--client-secret` (or env `OIDC_ISSUER` / `OIDC_AUDIENCE` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`).
 Flags: `--skip-validation` disables the discovery HTTP probe (falls back to provider-specific endpoint paths — see Generic OIDC Setup below). `--config-file PATH` overrides the default config path.
-Side effects: writes `oidc-config.json` and `oidc-values.yaml` (Helm values) in CWD.
-For Keycloak, the client must exist with an Audience mapper before this command runs — see `keycloak-client-howto.md` for the step-by-step (UI + `kcadm.sh`) procedure. **Keycloak requires FastMCP ≥ 3.2.4 on the MCP server side AND Keycloak ≥ 26.6.0 on the IdP side** — both minimums must hold. FastMCP is the framework the MCP server is built with (not a server itself), so check the MCP server project's `pyproject.toml` / lockfile.
+Side effects: writes `oidc-config.json` (includes `"pattern": "proxy"` and `server_client` block) and `oidc-values.yaml` (Helm values with `oidc.authType: "oidc"`, `redis.enabled: true`, `jwt.enabled: true`) in CWD.
+
+**`setup-oidc --provider keycloak`** — Pattern B (writes `oidc-config.json`)
+Required: `--issuer` (realm URL), `--audience`. **No `--client-id` / `--client-secret`**; any passed are ignored with a warning and not persisted.
+Side effects: writes `oidc-config.json` with `"pattern": "remote"` and **no `server_client` block**, plus `oidc-values.yaml` with `oidc.authType: "keycloak"`, `redis.enabled: false`, `jwt.enabled: false`. Subsequent `create-secrets` is a no-op.
+**Requires FastMCP ≥ 3.2.4 on the MCP server AND Keycloak ≥ 26.6.0 on the IdP** — both minimums must hold. FastMCP is the framework the MCP server is built with (not a server itself); check the MCP server project's `pyproject.toml` / lockfile. See `KEYCLOAK-HOWTO.md` for realm + DCR setup.
 
 **`create-secrets`** (requires `[kubernetes]` extra)
 Required: `--namespace`, `--release-name`. Reads `auth0-config.json` or `oidc-config.json` from CWD. Flags: `--dry-run`, `--force` (replace existing secrets).
+Checks `pattern` from the config file **before** touching kubeconfig: `"remote"` (Keycloak) exits `0` immediately with a notice and never contacts the cluster. `"proxy"` creates `<release>-oidc-credentials` (standardized name; the Auth0 path previously used `-auth0-credentials`) and `<release>-jwt-signing-key`.
 
 **`setup-rbac`** (requires `[kubernetes]` extra)
 Required: `--app-name`. Optional: `--namespace`, `--scope {cluster,namespace}` (default `cluster`), `--dry-run`, `--delete`.
@@ -102,9 +118,20 @@ Required: `--email`, `--client-type {server,test,both}` (`server`=production, `t
 | `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | `setup-oidc --provider {dex,keycloak,okta,generic}` |
 
 ### Typical agent pipeline
+
+Pattern B (Keycloak — no client creds, `create-secrets` is a no-op):
 ```bash
 cd /run/mcp-deploy && \
   mcp-base setup-oidc --provider keycloak \
+    --issuer "$OIDC_ISSUER" --audience "$OIDC_AUDIENCE" && \
+  mcp-base create-secrets --namespace mcp --release-name my-mcp && \
+  mcp-base setup-rbac --namespace mcp --app-name my-mcp --scope namespace
+```
+
+Pattern A (Dex/Okta/generic — pre-registered client, create-secrets writes two Secrets):
+```bash
+cd /run/mcp-deploy && \
+  mcp-base setup-oidc --provider dex \
     --issuer "$OIDC_ISSUER" --audience "$OIDC_AUDIENCE" \
     --client-id "$OIDC_CLIENT_ID" --client-secret "$OIDC_CLIENT_SECRET" && \
   mcp-base create-secrets --namespace mcp --release-name my-mcp && \
@@ -133,25 +160,32 @@ The CLI uses a two-level delegation pattern:
 
 ### Configuration Management
 
-**Auth0 Setup** (`setup_auth0.py`):
+**Auth0 Setup** (`setup_auth0.py`) — always Pattern A:
 - Uses a `ConfigManager` class for configuration
-- Saves to `auth0-config.json` with comprehensive Auth0 metadata
+- Saves to `auth0-config.json` with `"provider": "auth0"`, `"pattern": "proxy"`, and comprehensive Auth0 metadata
 - Supports precedence: CLI args > Environment variables > Saved config
 - Automatically creates/updates OIDC applications, APIs, and grants
 - Never persists tokens or sensitive credentials
+- Generated `auth0-values.yaml` includes `oidc.authType: "auth0"`, `redis.enabled: true`, `jwt.enabled: true`
 
-**Generic OIDC Setup** (`setup_generic.py`):
-- Simpler setup for pre-configured OIDC providers (Dex, Keycloak, Okta)
-- Saves to `oidc-config.json` with minimal provider configuration
-- Assumes client and secret are already configured in the IdP
+**Generic OIDC Setup** (`setup_generic.py`) — Pattern A or B depending on provider:
+- Pattern is derived by `pattern_for_provider()`: `keycloak` → `"remote"`, everything else → `"proxy"`
+- Saves to `oidc-config.json` with the `pattern` field; **Pattern B omits `server_client` entirely**
+- For Pattern B, `--client-id` / `--client-secret` are ignored with a warning
 - Validates issuer by checking `.well-known/openid-configuration`; **on success the discovery document's `authorization_endpoint`, `token_endpoint`, and `jwks_uri` are written to the saved config verbatim** — never guessed.
 - When validation is skipped (`--skip-validation`) or discovery fails, endpoints fall back to provider-specific defaults via `fallback_endpoints()`:
   - `keycloak` → `{issuer}/protocol/openid-connect/{auth,token,certs}`
   - `okta` → `{issuer}/v1/{authorize,token,keys}`
   - `dex` / `generic` / anything else → `{issuer}/auth`, `{issuer}/token`, `{issuer}/.well-known/jwks.json`
-- Displays required redirect URLs for manual IdP configuration
+- Generated `oidc-values.yaml`:
+  - Pattern A: `oidc.authType: "oidc"`, `oidc.clientId: <id>`, `redis.enabled: true`, `jwt.enabled: true`
+  - Pattern B: `oidc.authType: "keycloak"`, no `clientId`, `redis.enabled: false`, `jwt.enabled: false`, `oidc.requiredScopes: ["openid"]`
+- Displays required redirect URLs for manual IdP configuration (Pattern A only — Pattern B redirects are chosen by DCR at runtime)
 
-**create_secrets.py** auto-detects which config file to use (auth0-config.json or oidc-config.json) and creates appropriate Kubernetes secrets.
+**create_secrets.py** auto-detects which config file to use (auth0-config.json or oidc-config.json), peeks at the `pattern` field **before** connecting to Kubernetes, and:
+- Pattern B (`remote`) → prints a notice and exits `0` without touching the cluster
+- Pattern A (`proxy`) → creates `<release>-oidc-credentials` (standardized name; Auth0 path previously wrote `<release>-auth0-credentials`) and `<release>-jwt-signing-key`
+- Older configs without a `pattern` field: inferred from `provider` (`keycloak` → `remote`, else `proxy`)
 
 Key pattern: Configuration is the single source of truth, and the system can resume operations from saved state without re-entering most parameters.
 
