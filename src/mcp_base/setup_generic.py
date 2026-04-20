@@ -40,6 +40,33 @@ from urllib.parse import urlparse
 DEFAULT_CONFIG_FILE = "oidc-config.json"
 
 
+def fallback_endpoints(issuer: str, provider_name: str) -> Dict[str, str]:
+    """Provider-specific endpoint paths used when OIDC discovery is unavailable.
+
+    Only called when --skip-validation is set or discovery fails; otherwise the
+    discovery document is the source of truth.
+    """
+    issuer = issuer.rstrip('/')
+    if provider_name == "keycloak":
+        return {
+            "authorization_endpoint": f"{issuer}/protocol/openid-connect/auth",
+            "token_endpoint": f"{issuer}/protocol/openid-connect/token",
+            "jwks_uri": f"{issuer}/protocol/openid-connect/certs",
+        }
+    if provider_name == "okta":
+        return {
+            "authorization_endpoint": f"{issuer}/v1/authorize",
+            "token_endpoint": f"{issuer}/v1/token",
+            "jwks_uri": f"{issuer}/v1/keys",
+        }
+    # Dex / generic default
+    return {
+        "authorization_endpoint": f"{issuer}/auth",
+        "token_endpoint": f"{issuer}/token",
+        "jwks_uri": f"{issuer}/.well-known/jwks.json",
+    }
+
+
 class GenericOIDCSetup:
     """Setup for pre-configured OIDC providers."""
 
@@ -72,8 +99,12 @@ class GenericOIDCSetup:
         except Exception as e:
             print(f"⚠️  Could not save config file: {e}")
 
-    def validate_issuer(self, issuer: str) -> bool:
-        """Validate OIDC issuer by checking .well-known/openid-configuration."""
+    def validate_issuer(self, issuer: str) -> Optional[Dict[str, Any]]:
+        """Validate OIDC issuer via discovery and return the discovery document.
+
+        Returns the parsed discovery document on success, or None if validation
+        fails (unreachable issuer, malformed JSON, or missing required fields).
+        """
         print(f"\n🔍 Validating OIDC issuer: {issuer}")
 
         issuer = issuer.rstrip('/')
@@ -82,7 +113,7 @@ class GenericOIDCSetup:
         try:
             response = requests.get(discovery_url, timeout=10)
             response.raise_for_status()
-            discovery = response.json()
+            discovery: Dict[str, Any] = response.json()
 
             # Check required OIDC discovery fields
             required_fields = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_uri']
@@ -90,19 +121,22 @@ class GenericOIDCSetup:
 
             if missing_fields:
                 print(f"❌ Invalid OIDC discovery document. Missing fields: {', '.join(missing_fields)}")
-                return False
+                return None
 
             print(f"✅ Valid OIDC provider found")
             print(f"   Authorization endpoint: {discovery.get('authorization_endpoint')}")
             print(f"   Token endpoint: {discovery.get('token_endpoint')}")
             print(f"   JWKS URI: {discovery.get('jwks_uri')}")
 
-            return True
+            return discovery
 
         except requests.RequestException as e:
             print(f"⚠️  Warning: Could not validate OIDC issuer: {e}")
             print(f"   Make sure the issuer is correct and accessible")
-            return False
+            return None
+        except ValueError as e:
+            print(f"❌ Invalid OIDC discovery document (not JSON): {e}")
+            return None
 
     def show_redirect_urls(self, audience: str) -> None:
         """Display the redirect URLs that should be configured in the IdP."""
@@ -159,15 +193,17 @@ class GenericOIDCSetup:
         issuer = issuer.rstrip('/')
         audience = audience.rstrip('/')
 
-        # Validate issuer if requested
+        # Validate issuer if requested; discovery doc is the source of truth
+        # for endpoint URLs when available.
+        discovery: Optional[Dict[str, Any]] = None
         if validate:
-            self.validate_issuer(issuer)
+            discovery = self.validate_issuer(issuer)
 
         # Show required redirect URLs
         self.show_redirect_urls(audience)
 
         # Build configuration
-        config = {
+        config: Dict[str, Any] = {
             "provider": provider_name,
             "issuer": issuer,
             "audience": audience,
@@ -177,10 +213,12 @@ class GenericOIDCSetup:
             }
         }
 
-        # Derive common endpoints
-        config["authorization_endpoint"] = f"{issuer}/auth"
-        config["token_endpoint"] = f"{issuer}/token"
-        config["jwks_uri"] = f"{issuer}/.well-known/jwks.json"
+        if discovery:
+            config["authorization_endpoint"] = discovery["authorization_endpoint"]
+            config["token_endpoint"] = discovery["token_endpoint"]
+            config["jwks_uri"] = discovery["jwks_uri"]
+        else:
+            config.update(fallback_endpoints(issuer, provider_name))
 
         # Save configuration
         self.save_config(config)

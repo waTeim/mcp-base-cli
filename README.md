@@ -89,7 +89,8 @@ mcp-base setup-oidc --provider dex \
     --client-id YOUR_CLIENT_ID \
     --client-secret YOUR_CLIENT_SECRET
 
-# Keycloak
+# Keycloak — see keycloak-client-howto.md for full client setup.
+# NOTE: Requires FastMCP >= 3.2.4 on the MCP server AND Keycloak >= 26.6.0 on the IdP.
 mcp-base setup-oidc --provider keycloak \
     --issuer https://keycloak.example.com/realms/myrealm \
     --audience https://mcp-server.example.com/mcp \
@@ -117,6 +118,16 @@ Configure these redirect URLs in your OIDC provider:
 - **MCP Server**: `https://mcp-server.example.com/auth/callback` (replace with your actual server URL)
 - **Claude Desktop**: `https://claude.ai/api/mcp/auth_callback`
 - **Local testing** (optional): `http://localhost:8888/callback`, `http://localhost:8889/callback`
+
+**Endpoint resolution**
+
+When `setup-oidc` validates the issuer (the default), the `authorization_endpoint`, `token_endpoint`, and `jwks_uri` are read from the provider's `.well-known/openid-configuration` and saved verbatim to `oidc-config.json`. Pass `--skip-validation` to bypass the HTTP probe; in that case the endpoints are derived from provider-specific fallbacks:
+
+| Provider | Auth | Token | JWKS |
+|---|---|---|---|
+| `keycloak` | `{issuer}/protocol/openid-connect/auth` | `{issuer}/protocol/openid-connect/token` | `{issuer}/protocol/openid-connect/certs` |
+| `okta` | `{issuer}/v1/authorize` | `{issuer}/v1/token` | `{issuer}/v1/keys` |
+| `dex`, `generic` | `{issuer}/auth` | `{issuer}/token` | `{issuer}/.well-known/jwks.json` |
 
 ### Creating Kubernetes Secrets
 
@@ -215,8 +226,25 @@ mypy src/
    ```bash
    pip install build twine
    ```
+3. Create API tokens and save them locally (git-ignored):
+   ```bash
+   echo "pypi-YOUR_TEST_TOKEN" > test.token && chmod 600 test.token
+   echo "pypi-YOUR_PROD_TOKEN" > prod.token && chmod 600 prod.token
+   ```
 
-### Build the Package
+### Makefile (preferred)
+
+```bash
+make build    # Clean + build only; artifacts in dist/
+make test     # Run pytest
+make dev      # Publish to Test PyPI using ./test.token
+make prod     # Publish to production PyPI using ./prod.token (prompts "yes" to confirm)
+make clean    # Remove dist/, build/, *.egg-info
+```
+
+`make dev` / `make prod` refuse to run if the expected token file is missing or empty.
+
+### Build the Package Manually
 
 ```bash
 # Clean previous builds

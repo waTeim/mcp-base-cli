@@ -45,23 +45,73 @@ mypy src/
 ```
 
 ### Building and Publishing
+
+The project uses `publish.py` as the canonical publish entry point; `Makefile` wraps it with fixed token filenames.
+
 ```bash
-# Clean and build package
-rm -rf dist/ build/ *.egg-info src/*.egg-info
-python -m build
+# Makefile targets (preferred)
+make build       # Build only. Artifacts land in dist/
+make dev         # Publish to Test PyPI using ./test.token
+make prod        # Publish to production PyPI using ./prod.token (publish.py prompts for "yes" confirmation)
+make test        # pytest
+make clean       # Remove dist/, build/, *.egg-info
 
-# Publish to Test PyPI using helper script
-python publish.py
-
-# Publish to production PyPI using helper script
-python publish.py --prod
-
-# Publish with token file
-python publish.py --prod --token-file ~/.pypi-token
-
-# Build only (no publish)
-python publish.py --build
+# Direct publish.py invocation
+python publish.py --build                            # Build only
+python publish.py --token-file test.token            # Test PyPI
+python publish.py --prod --token-file prod.token     # Production PyPI (interactive confirmation)
 ```
+
+Token files (`test.token`, `prod.token`) contain a raw PyPI API token on a single line. `.gitignore` covers `*.token`. The Makefile refuses to run if the expected file is missing or empty.
+
+## Agent Usage Guide
+
+This section is written for automated agents invoking `mcp-base`. Prefer these patterns over the interactive flows in `README.md`.
+
+### Non-interactive invocation rules
+- Every subcommand prompts when stdin is a TTY and a required value is missing. To guarantee non-interactive behavior, pass every required flag explicitly or set the documented env var.
+- Fatal errors exit with status `1` and print to stdout (not stderr). Check the exit code, not the output text.
+- Config files are written to the current working directory: `auth0-config.json` (Auth0) or `oidc-config.json` (generic). `cd` into a stable directory before invoking, and read back from there.
+- `create-secrets` auto-detects which config file exists in CWD. If both exist, behavior is file-specific — pick one directory per environment.
+
+### Command contracts
+
+**`setup-oidc --provider auth0`** (full automation; writes `auth0-config.json`)
+Required: `--domain`, `--api-identifier`, `--token` (or env `AUTH0_MGMT_TOKEN`).
+Side effects: creates/updates Auth0 Resource Server, M2M client, server client, grants. `--recreate-client` forces client recreation if secrets are lost.
+
+**`setup-oidc --provider {dex,keycloak,okta,generic}`** (writes `oidc-config.json`)
+Required: `--issuer`, `--audience`, `--client-id`, `--client-secret` (or env `OIDC_ISSUER` / `OIDC_AUDIENCE` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`).
+Flags: `--skip-validation` disables the discovery HTTP probe (falls back to provider-specific endpoint paths — see Generic OIDC Setup below). `--config-file PATH` overrides the default config path.
+Side effects: writes `oidc-config.json` and `oidc-values.yaml` (Helm values) in CWD.
+For Keycloak, the client must exist with an Audience mapper before this command runs — see `keycloak-client-howto.md` for the step-by-step (UI + `kcadm.sh`) procedure. **Keycloak requires FastMCP ≥ 3.2.4 on the MCP server side AND Keycloak ≥ 26.6.0 on the IdP side** — both minimums must hold. FastMCP is the framework the MCP server is built with (not a server itself), so check the MCP server project's `pyproject.toml` / lockfile.
+
+**`create-secrets`** (requires `[kubernetes]` extra)
+Required: `--namespace`, `--release-name`. Reads `auth0-config.json` or `oidc-config.json` from CWD. Flags: `--dry-run`, `--force` (replace existing secrets).
+
+**`setup-rbac`** (requires `[kubernetes]` extra)
+Required: `--app-name`. Optional: `--namespace`, `--scope {cluster,namespace}` (default `cluster`), `--dry-run`, `--delete`.
+
+**`add-user`**
+Required: `--email`, `--client-type {server,test,both}` (`server`=production, `test`=testing). Mutates `auth0-config.json` in CWD.
+
+### Environment variables (for non-interactive runs)
+| Variable | Consumed by |
+|---|---|
+| `AUTH0_DOMAIN`, `AUTH0_API_IDENTIFIER`, `AUTH0_MGMT_TOKEN` | `setup-oidc --provider auth0` |
+| `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | `setup-oidc --provider {dex,keycloak,okta,generic}` |
+
+### Typical agent pipeline
+```bash
+cd /run/mcp-deploy && \
+  mcp-base setup-oidc --provider keycloak \
+    --issuer "$OIDC_ISSUER" --audience "$OIDC_AUDIENCE" \
+    --client-id "$OIDC_CLIENT_ID" --client-secret "$OIDC_CLIENT_SECRET" && \
+  mcp-base create-secrets --namespace mcp --release-name my-mcp && \
+  mcp-base setup-rbac --namespace mcp --app-name my-mcp --scope namespace
+```
+
+Publishing from an agent: use `make dev` / `make prod`; both require the corresponding `*.token` file in CWD and will exit `1` if missing. `make prod` still triggers `publish.py`'s interactive "yes/no" prompt, so pipe `yes` or call `publish.py --prod --token-file prod.token` directly if you need to bypass it.
 
 ## Architecture
 
@@ -94,7 +144,11 @@ The CLI uses a two-level delegation pattern:
 - Simpler setup for pre-configured OIDC providers (Dex, Keycloak, Okta)
 - Saves to `oidc-config.json` with minimal provider configuration
 - Assumes client and secret are already configured in the IdP
-- Validates issuer by checking `.well-known/openid-configuration`
+- Validates issuer by checking `.well-known/openid-configuration`; **on success the discovery document's `authorization_endpoint`, `token_endpoint`, and `jwks_uri` are written to the saved config verbatim** — never guessed.
+- When validation is skipped (`--skip-validation`) or discovery fails, endpoints fall back to provider-specific defaults via `fallback_endpoints()`:
+  - `keycloak` → `{issuer}/protocol/openid-connect/{auth,token,certs}`
+  - `okta` → `{issuer}/v1/{authorize,token,keys}`
+  - `dex` / `generic` / anything else → `{issuer}/auth`, `{issuer}/token`, `{issuer}/.well-known/jwks.json`
 - Displays required redirect URLs for manual IdP configuration
 
 **create_secrets.py** auto-detects which config file to use (auth0-config.json or oidc-config.json) and creates appropriate Kubernetes secrets.
