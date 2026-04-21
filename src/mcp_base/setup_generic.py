@@ -297,7 +297,7 @@ class GenericOIDCSetup:
         else:
             pattern_block = """  # Pattern B — FastMCP's KeycloakAuthProvider uses Keycloak native DCR.
   # No pre-registered client, no client secret, no Kubernetes credentials secret.
-  requiredScopes: ["openid"]
+  requiredScopes: ["openid", "mcp-scope"]
 """
 
         redis_enabled = "true" if is_proxy else "false"

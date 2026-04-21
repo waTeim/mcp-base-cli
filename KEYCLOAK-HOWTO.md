@@ -1,6 +1,6 @@
 # Keycloak How-To
 
-> **Compatibility:** Keycloak support in [FastMCP](https://github.com/jlowin/fastmcp) (the framework the MCP server is built with) was added in **FastMCP 3.2.4**, and only works against **Keycloak 26.6.0 or newer**. Both constraints must hold simultaneously — an older FastMCP cannot talk to any Keycloak, and FastMCP 3.2.4+ cannot talk to Keycloak < 26.6.0. If either side is below these minimums, use the Pattern A fallback at the end of this doc (`--provider generic` with a Keycloak issuer) instead.
+> **Compatibility:** Keycloak support in [FastMCP](https://github.com/jlowin/fastmcp) (the framework the MCP server is built with) was added in **FastMCP 3.2.4**, and only works against **Keycloak 26.6.0 or newer**. Both constraints must hold simultaneously. If either side is below these minimums, use the Pattern A fallback at the end of this doc (`--provider generic` with a Keycloak issuer) instead.
 
 `mcp-base setup-oidc --provider keycloak` targets **Pattern B** (Remote DCR) as defined in [`imp/cli-integration-contract.md`](imp/cli-integration-contract.md) §1. FastMCP's `KeycloakAuthProvider` registers MCP clients dynamically through Keycloak's native Dynamic Client Registration — **you do not pre-create a client, there is no client secret to copy, and no Kubernetes credentials Secret is created**. `create-secrets` is a no-op for this pattern.
 
@@ -13,18 +13,39 @@ At the end of this procedure you will have two values to pass to `setup-oidc`:
 
 ---
 
+## How the flow works
+
+The MCP server publishes protected-resource metadata at:
+
+```
+https://<mcp-server-host>/.well-known/oauth-protected-resource/mcp
+```
+
+Expected response:
+
+```json
+{
+  "resource": "https://<mcp-server-host>/mcp",
+  "authorization_servers": ["https://<keycloak-host>/realms/<realm>"],
+  "scopes_supported": ["openid", "mcp-scope"],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+`scopes_supported` **must include `mcp-scope`**. MCP clients read this metadata and request `openid mcp-scope` during OAuth. Keycloak runs the Audience mapper attached to `mcp-scope`, which stamps the `aud` claim that FastMCP validates. If the server advertises only `openid`, clients never request `mcp-scope`, the Audience mapper never fires, and FastMCP rejects every token with `audience mismatch (got None, expected '...')`.
+
+---
+
 ## Prerequisites
 
-- **MCP server built on FastMCP ≥ 3.2.4.** First release with `KeycloakAuthProvider`. FastMCP is a framework, not a server you run directly — check the MCP server project's `pyproject.toml` / lockfile.
+- **MCP server built on FastMCP ≥ 3.2.4.** FastMCP is a framework, not a server you run directly — check the MCP server project's `pyproject.toml` / lockfile.
 - **Keycloak ≥ 26.6.0.** FastMCP's Keycloak support requires DCR features introduced in this release.
 - Admin credentials for the master realm (or equivalent permissions on the target realm).
-- The MCP server's public base URL and its API audience identifier. Typically the audience is the MCP URL ending in `/mcp`, e.g. `https://mcp-server.example.com/mcp`.
+- The MCP server's public base URL and its API audience identifier (typically the MCP URL ending in `/mcp`, e.g. `https://mcp-server.example.com/mcp`).
 
 ---
 
 ## Step 1 — Pick or create a realm
-
-The realm is the tenant boundary. `--issuer` points at the realm URL, not the Keycloak root.
 
 1. Admin Console → top-left realm switcher → **Create Realm** (or select an existing one).
 2. Give it a name (e.g. `mcp`). The issuer becomes `https://<keycloak-host>/realms/mcp`.
@@ -33,44 +54,83 @@ Do **not** use the `master` realm for applications.
 
 ---
 
-## Step 2 — Enable Dynamic Client Registration
+## Step 2 — Create the `mcp-scope` client scope
 
-Pattern B requires DCR to be enabled on the realm so FastMCP can register the MCP client at runtime. The exact Keycloak admin path depends on your registration policy; the simplest working combination for a trusted environment is:
+`mcp-scope` is a real Keycloak client scope object. It carries the Audience mapper that stamps `aud` claims in tokens, and it is what triggers the mapper when clients request it during OAuth.
 
-1. Realm → **Client registration** (left nav) → **Policies** tab.
-2. Under **Anonymous Access Policies**, confirm the defaults are in place — Keycloak ships a restrictive set that allows registration but constrains scopes/protocol mappers.
-3. If your deployment requires authenticated registration, create an **Initial Access Token**: Realm → **Client registration** → **Initial access token** → **Create**. Give it to whichever FastMCP configuration mechanism consumes it. For anonymous DCR (the default), no token is needed.
+> **Note on `openid`:** `openid` is an OAuth/OIDC *protocol scope string*, not a Keycloak client scope object. Do not create a Keycloak client scope named `openid`. Keycloak may log `Referenced client scope 'openid' doesn't exist. Ignoring` — that is expected and harmless. The DCR registration policy still requires the literal string `openid` in its allowed-scopes list (covered in Step 3).
 
-The exact DCR configuration Keycloak requires may evolve across 26.x releases; consult the Keycloak docs at https://www.keycloak.org/docs for the specifics that match your version. FastMCP's `KeycloakAuthProvider` documentation will tell you which registration mode it uses.
+### Create the scope
 
----
+1. Realm → **Client scopes** (left nav) → **Create client scope**.
+2. Settings:
+   - Name: `mcp-scope`
+   - Protocol: `openid-connect`
+   - Include in token scope: **ON**
+3. Save.
 
-## Step 3 — Ensure tokens carry the MCP audience
+### Add the Audience mapper
 
-By default, Keycloak issues access tokens whose `aud` claim is the client_id of the registered client. FastMCP validates `aud` against your configured audience — without an audience mapper, every MCP request fails with an audience mismatch.
-
-Because DCR-registered clients don't exist until FastMCP registers them, the audience mapper needs to live on a **shared** client scope (not a client-dedicated one) so every newly-registered client inherits it.
-
-1. Realm → **Client scopes** (left nav).
-2. Either edit an existing default scope (e.g. `profile`) or create a new scope (e.g. `mcp-audience`) and mark it as a **Default** scope for the realm under **Realm settings → Client registration → Default scopes**.
-3. Open the scope → **Mappers** tab → **Add mapper → By configuration → Audience**.
-4. Fill in:
+4. Open `mcp-scope` → **Mappers** tab → **Add mapper → By configuration → Audience**.
+5. Fill in:
    - Name: `mcp-audience`
    - Included Client Audience: leave blank
    - **Included Custom Audience**: the exact value you will pass to `--audience` (e.g. `https://mcp-server.example.com/mcp`)
    - Add to access token: **On**
-   - Add to ID token: Off
-5. Save.
+   - Add to ID token: **Off**
+6. Save.
 
-Verify: after a test DCR + login flow, decode the issued access token at https://jwt.io — the `aud` claim must contain your custom audience string.
+### Make the scope a realm default
+
+7. Realm → **Client scopes** → find `mcp-scope` → set **Assigned type** to **Default**.
+
+DCR-registered clients inherit default scopes automatically. Without this, newly registered MCP clients won't have `mcp-scope` and the audience mapper will never run.
 
 ---
 
-## Step 4 — Create a test user (if the realm has none)
+## Step 3 — Configure Dynamic Client Registration policies
+
+1. Realm → **Clients → Client registration** (left nav) → **Policies** tab.
+2. Click **Anonymous Access Policies**.
+
+### Trusted Hosts policy
+
+Keycloak's Trusted Hosts policy checks both the sender host and the redirect URIs of registering clients. Cloud MCP clients (Claude, ChatGPT, etc.) register from hosts that Keycloak can't predict in advance.
+
+Add the callback domains used by the MCP clients you support:
+
+```
+chatgpt.com
+claude.ai
+```
+
+Policy shape that works for cloud MCP clients:
+
+| Check | Setting |
+|---|---|
+| Host sending client registration request must match | **OFF** |
+| Client URIs must match | **ON** |
+
+If Keycloak requires keeping at least one host-based check, disable sender-host matching and keep only the client URI check. Enabling sender-host matching against ingress or service-mesh traffic will cause spurious rejections like `Failed to verify remote host: 10.233.90.0`.
+
+### Allowed Client Scopes policy
+
+DCR will fail with `Requested scope 'openid' not trusted` if `openid` is not in the allowed list, even though `openid` is not a real Keycloak client scope object — the policy validates the requested scope *strings*.
+
+Add both:
+
+```
+openid
+mcp-scope
+```
+
+---
+
+## Step 4 — Create a test user
 
 1. Left nav → **Users** → **Add user**.
-2. Username, email verified: On. Save.
-3. **Credentials** tab → **Set password**. Turn **Temporary** off for scripted logins.
+2. Set username, email verified: **On**. Save.
+3. **Credentials** tab → **Set password**. Turn **Temporary** off.
 
 ---
 
@@ -84,12 +144,27 @@ mcp-base setup-oidc --provider keycloak \
   --audience https://<mcp-server-host>/mcp
 ```
 
-No `--client-id` / `--client-secret` are needed. If you pass them anyway, the CLI prints a warning and drops them — they are never written to `oidc-config.json`.
+No `--client-id` / `--client-secret` are needed. Any that are passed are ignored with a warning and not written to `oidc-config.json`.
 
-`setup-oidc` will:
-- Hit `<issuer>/.well-known/openid-configuration` and write the real `authorization_endpoint`, `token_endpoint`, and `jwks_uri` into `oidc-config.json`.
-- Set `"provider": "keycloak"`, `"pattern": "remote"` in `oidc-config.json` and omit any `server_client` block.
-- Generate `oidc-values.yaml` with `oidc.authType: "keycloak"`, `redis.enabled: false`, `jwt.enabled: false`.
+`setup-oidc` writes:
+- `oidc-config.json` with `"provider": "keycloak"`, `"pattern": "remote"`, no `server_client` block, and OIDC endpoints from discovery.
+- `oidc-values.yaml` for the Helm chart:
+
+```yaml
+oidc:
+  authType: "keycloak"
+  issuer: "https://<keycloak-host>/realms/<realm>"
+  audience: "https://<mcp-server-host>/mcp"
+  requiredScopes: ["openid", "mcp-scope"]
+
+redis:
+  enabled: false
+
+jwt:
+  enabled: false
+```
+
+`requiredScopes: ["openid", "mcp-scope"]` drives the `scopes_supported` list in the MCP server's protected-resource metadata. Both scopes must be present for the audience mapper to fire.
 
 Pass `--skip-validation` if the CLI host cannot reach Keycloak; endpoint paths fall back to `{issuer}/protocol/openid-connect/{auth,token,certs}`.
 
@@ -99,7 +174,7 @@ Pass `--skip-validation` if the CLI host cannot reach Keycloak; endpoint paths f
 
 For Pattern B this command is a no-op:
 
-```bash
+```
 $ mcp-base create-secrets --namespace mcp --release-name my-mcp
 Pattern B detected (Keycloak native DCR).
 No Kubernetes secrets are required — FastMCP's KeycloakAuthProvider
@@ -111,9 +186,40 @@ The command exits `0` without contacting the Kubernetes API — safe to leave in
 
 ---
 
-## Scripted alternative with `kcadm.sh`
+## Step 7 — Verify
 
-For agents and CI, the Keycloak admin CLI sets up realm + audience mapper without clicking.
+After deploying the MCP server, check the protected-resource metadata:
+
+```bash
+curl https://<mcp-server-host>/.well-known/oauth-protected-resource/mcp
+```
+
+Expected:
+
+```json
+{
+  "resource": "https://<mcp-server-host>/mcp",
+  "authorization_servers": ["https://<keycloak-host>/realms/<realm>"],
+  "scopes_supported": ["openid", "mcp-scope"],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+Then reconnect an MCP client and decode the issued access token. Expected claims:
+
+```json
+{
+  "iss": "https://<keycloak-host>/realms/<realm>",
+  "aud": "https://<mcp-server-host>/mcp",
+  "scope": "openid mcp-scope"
+}
+```
+
+If `aud` is missing, work through the audience-mismatch checklist in the Troubleshooting section below.
+
+---
+
+## Scripted alternative with `kcadm.sh`
 
 ```bash
 kcadm.sh config credentials \
@@ -123,19 +229,20 @@ kcadm.sh config credentials \
 REALM=mcp
 AUDIENCE=https://mcp-server.example.com/mcp
 
-# (1) Create the realm (skip if it exists)
+# (1) Create the realm
 kcadm.sh create realms -s realm="$REALM" -s enabled=true
 
-# (2) Create a shared client scope with the audience mapper and mark it default
+# (2) Create mcp-scope with Include in token scope enabled
 SCOPE_ID=$(kcadm.sh create client-scopes -r "$REALM" -f - -i <<EOF
 {
-  "name": "mcp-audience",
+  "name": "mcp-scope",
   "protocol": "openid-connect",
   "attributes": { "include.in.token.scope": "true" }
 }
 EOF
 )
 
+# (3) Add the Audience mapper to mcp-scope
 kcadm.sh create "client-scopes/$SCOPE_ID/protocol-mappers/models" -r "$REALM" -f - <<EOF
 {
   "name": "mcp-audience",
@@ -149,10 +256,15 @@ kcadm.sh create "client-scopes/$SCOPE_ID/protocol-mappers/models" -r "$REALM" -f
 }
 EOF
 
-# Add the scope to the realm's default scopes so DCR-registered clients inherit it
+# (4) Make mcp-scope a realm default so DCR clients inherit it
 kcadm.sh update "realms/$REALM/default-default-client-scopes/$SCOPE_ID" -r "$REALM"
 
-# (3) Hand off to setup-oidc — no client credentials
+# (5) Allow openid and mcp-scope in anonymous DCR allowed-scopes policy
+# (exact kcadm path varies by Keycloak version; check UI if this errors)
+kcadm.sh update "realms/$REALM" -r "$REALM" \
+  -s 'clientRegistrationPolicy.Allowed Client Scopes.allowedScopes=["openid","mcp-scope"]'
+
+# (6) Hand off to setup-oidc
 mcp-base setup-oidc --provider keycloak \
   --issuer   "$KC_URL/realms/$REALM" \
   --audience "$AUDIENCE"
@@ -162,34 +274,49 @@ mcp-base setup-oidc --provider keycloak \
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
-|---|---|
-| MCP server rejects token with `aud` mismatch | Audience mapper missing from a default (realm-level) client scope, or not marked **Add to access token**. Clients created via DCR only see default scopes. |
-| FastMCP can't register a client with Keycloak | DCR not enabled, or registration policy is rejecting the request. Check Keycloak server logs under **Events → Admin events**. |
-| MCP server accepts tokens but reports "unsupported provider" | FastMCP version < 3.2.4. Upgrade the MCP server's FastMCP dependency. |
-| DCR appears to work but tokens are malformed / missing claims | Keycloak version < 26.6.0 returning DCR responses in an older format. Upgrade Keycloak. |
-| `mcp-base setup-oidc` prints "Could not validate OIDC issuer" | The CLI's host cannot reach `{issuer}/.well-known/openid-configuration`. Verify DNS/TLS, or rerun with `--skip-validation` if the endpoints are known to be standard Keycloak paths. |
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| DCR fails — `URI '…' doesn't match any trustedHost or trustedDomain` | Callback host not in Trusted Hosts | Add `chatgpt.com`, `claude.ai`, or the exact callback host to Trusted Hosts |
+| DCR fails — `Failed to verify remote host: 10.x.x.x` | Sender-host check is matching an internal/proxy IP | Disable **Host sending client registration request must match** |
+| DCR fails — `Requested scope 'openid' not trusted` | `openid` not in Allowed Client Scopes policy | Add the literal string `openid` to the policy's allowed list |
+| DCR fails — `Not permitted to use specified clientScope` | `mcp-scope` not in Allowed Client Scopes policy | Add `mcp-scope` to the policy's allowed list |
+| Token rejected — `audience mismatch (got None, expected '...')` | `mcp-scope` mapper never ran (scope not requested or mapper not firing) | Verify: `mcp-scope` is a realm default scope; `requiredScopes: ["openid", "mcp-scope"]` in Helm values; `mcp-scope` has the Audience mapper; **Include in token scope: ON**; MCP client was force-reconnected after scope changes |
+| Token missing `mcp-scope` in `scope` claim | `Include in token scope` is OFF for `mcp-scope` | Turn it **ON** on the `mcp-scope` client scope |
+| Keycloak logs `Referenced client scope 'openid' doesn't exist. Ignoring` | `openid` is a protocol scope string, not a Keycloak client scope object | Expected/harmless — do not create a Keycloak client scope named `openid` |
+| MCP server logs show `unsupported provider` | FastMCP version < 3.2.4 | Upgrade the MCP server's FastMCP dependency |
+| Server accepts tokens but claims are malformed | Keycloak < 26.6.0 DCR format incompatibility | Upgrade Keycloak |
+| `mcp-base setup-oidc` prints "Could not validate OIDC issuer" | CLI host cannot reach `{issuer}/.well-known/openid-configuration` | Check DNS/TLS; rerun with `--skip-validation` |
+
+### Audience-mismatch checklist
+
+When FastMCP logs `audience mismatch (got None, expected '...')`, check all of these in order:
+
+1. MCP protected-resource metadata advertises `mcp-scope` in `scopes_supported`.
+2. `requiredScopes: ["openid", "mcp-scope"]` is set in the MCP server's Helm values.
+3. Keycloak DCR Allowed Client Scopes includes both `openid` and `mcp-scope`.
+4. `mcp-scope` has the Audience mapper with the correct custom audience value.
+5. `mcp-scope` has **Include in token scope: ON**.
+6. `mcp-scope` is a **Default** realm scope so DCR-registered clients inherit it.
+7. The MCP client was removed and re-added (or forced through a fresh OAuth flow) after the scope configuration changed — clients may cache old grants.
 
 ---
 
 ## Appendix — Pattern A fallback (older Keycloak, or pre-registered client)
 
-If your Keycloak is older than 26.6.0, or your FastMCP is older than 3.2.4, or you simply prefer to pre-register a confidential client, use **Pattern A** instead by running `setup-oidc --provider generic` (not `keycloak`) against a Keycloak realm. The CLI will then treat it like any other OIDC provider: client secret required, Redis + JWT secrets created.
+If your Keycloak is older than 26.6.0, or your FastMCP is older than 3.2.4, or you prefer a pre-registered confidential client, use **Pattern A** instead by running `setup-oidc --provider generic` (not `keycloak`) against the Keycloak realm. The CLI treats it like any other OIDC provider: client secret required, Redis + JWT signing-key Secrets created.
 
-### A.1 — Create the confidential client (Admin UI)
+### A.1 — Create the confidential client
 
 1. Realm → **Clients** → **Create client**.
-2. **General settings**: Client type **OpenID Connect**, Client ID e.g. `mcp-server`.
-3. **Capability config**: Client authentication **On**, Standard flow **On**, Direct access grants **On** (for testing).
-4. **Login settings → Valid redirect URIs**:
+2. Client type: **OpenID Connect**, Client ID: e.g. `mcp-server`. Client authentication: **On**. Standard flow: **On**.
+3. **Valid redirect URIs**:
    ```
    https://<mcp-server-host>/auth/callback
    https://claude.ai/api/mcp/auth_callback
    http://localhost:8888/callback
    http://localhost:8889/callback
    ```
-5. **Save**.
-6. **Credentials** tab → copy the **Client secret**.
+4. Save → **Credentials** tab → copy the **Client secret**.
 
 ### A.2 — Audience mapper on the dedicated scope
 
