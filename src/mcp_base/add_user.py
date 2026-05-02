@@ -65,6 +65,11 @@ def main():
         choices=["server", "test", "both"],
         help="Which client to grant access to (server=production, test=testing, both=both)"
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Interactively reconcile drift between mcp-project.yaml and auth0-config.json (TTY only)"
+    )
 
     args = parser.parse_args()
 
@@ -74,6 +79,12 @@ def main():
     print()
 
     config = load_auth0_config()
+
+    # Reconcile mcp-project.yaml with auth0-config.json. Without --fix this
+    # is print-only; with --fix, missing fields are auto-added and conflicts
+    # prompt for confirmation.
+    from mcp_base.drift import reconcile_from_command
+    reconcile_from_command(config, "auth0-config.json", fix=args.fix)
 
     domain = config.get("domain")
     mgmt_api = config.get("management_api", {})

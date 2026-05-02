@@ -188,10 +188,19 @@ def main():
         remaining.append(arg)
         i += 1
 
-    # If no provider specified, show comprehensive help
+    # If no provider specified, try mcp-project.yaml before erroring out.
     if provider is None:
         if "--help" in remaining or "-h" in remaining:
             show_help()
+            sys.exit(1)
+
+        from mcp_base.project_config import load_project_defaults
+        defaults = load_project_defaults()
+        for warning in defaults.warnings:
+            print(f"⚠️  {warning}")
+        if defaults.provider_name:
+            provider = defaults.provider_name
+            print(f"📄 Using --provider {provider} from {defaults.source_path}")
         else:
             print("Error: --provider option is required")
             print()
@@ -199,7 +208,7 @@ def main():
             print()
             print("Usage: mcp-base setup-oidc --provider <provider> [options]")
             print("Run 'mcp-base setup-oidc --help' for detailed information")
-        sys.exit(1)
+            sys.exit(1)
 
     # Validate provider
     if provider not in SUPPORTED_PROVIDERS:

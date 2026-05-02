@@ -331,6 +331,11 @@ Pattern A Secrets:
         help="Application name for labels (default: mcp-server)",
         default="mcp-server"
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Interactively reconcile drift between mcp-project.yaml and the saved config (TTY only)"
+    )
 
     args = parser.parse_args()
 
@@ -356,6 +361,14 @@ Pattern A Secrets:
     # Check this BEFORE connecting to Kubernetes so the command is a true no-op
     # on hosts without a kubeconfig. See imp/cli-integration-contract.md §5.3.
     preview = _peek_config(args.config_file)
+
+    # Reconcile mcp-project.yaml with the saved CLI artifacts. Without --fix
+    # this is a print-only summary; with --fix, missing fields are auto-added
+    # and conflicts prompt for confirmation.
+    from mcp_base.drift import reconcile_from_command
+    if preview:
+        reconcile_from_command(preview, args.config_file, fix=args.fix)
+
     provider_type = preview.get('provider', 'auth0')
     pattern = preview.get('pattern') or ("remote" if provider_type == "keycloak" else "proxy")
     if pattern == "remote":

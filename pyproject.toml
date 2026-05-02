@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-base"
-version = "0.5.1"
+version = "0.7.2"
 description = "CLI tools for MCP (Model Context Protocol) server setup and management with OIDC support (Auth0, Dex, Keycloak)"
 readme = "README.md"
 license = "MIT"
@@ -41,6 +41,8 @@ classifiers = [
 
 dependencies = [
     "requests>=2.28.0",
+    "PyYAML>=6.0",
+    "ruamel.yaml>=0.17",
 ]
 
 [project.optional-dependencies]

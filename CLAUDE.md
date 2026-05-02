@@ -85,6 +85,36 @@ Every provider resolves to exactly one pattern. The CLI writes a `pattern` field
 - Config files are written to the current working directory: `auth0-config.json` (Auth0) or `oidc-config.json` (generic). `cd` into a stable directory before invoking, and read back from there.
 - `create-secrets` auto-detects which config file exists in CWD. If both exist, behavior is file-specific — pick one directory per environment.
 
+### `mcp-project.yaml` as a defaults source
+`setup-oidc` auto-detects `./mcp-project.yaml` (CWD only — no parent walk). When present, its `publicEndpoint` and `auth` blocks supply defaults with this precedence:
+
+> CLI flag > env var > `mcp-project.yaml` > saved `oidc-config.json` / `auth0-config.json` > interactive prompt
+
+Mappings:
+- `publicEndpoint.host` / `scheme` / `path` → `ingress.host` / `ingress.tls.enabled` (`https` → true) / `ingress.path` in `oidc-values.yaml` (and `auth0-values.yaml`).
+- `publicEndpoint.{scheme,host,mcpPath}` → default `oidc.audience` = `<scheme>://<host><mcpPath>` if `auth.audience` is omitted.
+- `publicEndpoint.{scheme,host,path}` → `oidc.publicUrl`.
+- `auth.type` → `--provider`: `keycloak`/`auth0` map directly; `oidc` maps to `auth.providerName` (one of `dex`, `okta`, `generic`; defaults to `generic`).
+- `auth.issuer` / `auth.audience` / `auth.requiredScopes` → `oidc.issuer` / `oidc.audience` / `oidc.requiredScopes` (verbatim — `openid` is **not** auto-injected).
+- `auth.auth0.domain` / `auth.auth0.apiIdentifier` → Auth0 `--domain` / `--api-identifier`. Tokens never live in the project file.
+- Client credentials (`OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`, `AUTH0_MGMT_TOKEN`) are **never** read from `mcp-project.yaml` — they stay on flags / env / saved config only.
+
+When the project file is absent (or omits a field), the CLI falls back to the existing flag/env/prompt flow without changing behavior.
+
+### Reconciling `mcp-project.yaml` with saved artifacts (`--fix`)
+`mcp-project.yaml` is the intended source of truth, but on existing deployments the CLI artifacts (`oidc-config.json` / `auth0-config.json` / `oidc-values.yaml`) came first. Every subcommand that touches those artifacts compares the project file against them and surfaces drift. The compared fields are the *project file's* counterparts of:
+
+- `oidc-config.json`: `provider` (→ `auth.type` + optional `auth.providerName`), `issuer`, `audience`
+- `auth0-config.json`: `domain` (→ `auth.auth0.domain`), `audience` (→ `auth.auth0.apiIdentifier` and `auth.audience`)
+- `oidc-values.yaml`: `oidc.requiredScopes` (→ `auth.requiredScopes`), `ingress.host` / `ingress.tls.enabled` / `ingress.path` (→ `publicEndpoint.host` / `scheme` / `path`), with `publicEndpoint.mcpPath` derived from the audience URL path. The CLI's example placeholder host (`mcp-api.example.com`) is never proposed.
+
+Without `--fix`: print a summary of missing / conflicting fields and continue. **No file is modified.**
+
+With `--fix` (`setup-oidc`, `create-secrets`, `add-user`):
+- Fields **missing** in `mcp-project.yaml` for which a non-default saved value exists are **auto-added** without prompting.
+- Fields **present in both but differing** trigger a per-field prompt (`y` / `n` / `a`ll / `s`kip-all). Non-TTY `--fix` skips the conflict prompts (auto-add still applies).
+- The file is rewritten with `ruamel.yaml`, preserving comments and key order.
+
 ### Command contracts
 
 **`setup-oidc --provider auth0`** (full automation; writes `auth0-config.json`)

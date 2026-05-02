@@ -31,6 +31,9 @@ from typing import Dict, Any, List, Optional, Tuple
 from urllib.parse import urlparse
 from pathlib import Path
 
+from mcp_base.project_config import ProjectDefaults, load_project_defaults
+from mcp_base.drift import reconcile_from_command
+
 
 DEFAULT_CONFIG_FILE = "auth0-config.json"
 
@@ -82,14 +85,20 @@ class ConfigManager:
         key: str,
         cli_value: Any = None,
         env_var: Optional[str] = None,
-        default: Any = None
+        default: Any = None,
+        project_value: Any = None,
     ) -> Any:
+        """Resolve a config value with precedence:
+        CLI > env var > mcp-project.yaml > saved config > default.
+        """
         if cli_value is not None:
             return cli_value
         if env_var:
             env_value = os.getenv(env_var)
             if env_value:
                 return env_value
+        if project_value:
+            return project_value
         if key in self.config:
             return self.config[key]
         return default
@@ -979,7 +988,11 @@ def save_output_files(
     connection_id: str,
     output_dir: str = ".",
     save_config: bool = True,
-    use_dcr: bool = False
+    use_dcr: bool = False,
+    ingress_host: Optional[str] = None,
+    ingress_path: Optional[str] = None,
+    ingress_tls_enabled: Optional[bool] = None,
+    public_url: Optional[str] = None,
 ) -> None:
     """Save configuration files."""
     print("\n💾 Saving configuration files...")
@@ -1032,9 +1045,15 @@ def save_output_files(
     image_tag = make_env.get('TAG', '')
     image_repo = f"{registry}/{image_name}"
 
-    # Extract hostname from audience URL for ingress
+    # Extract hostname from audience URL for ingress; project file overrides.
     audience_parsed = urlparse(api_identifier)
-    ingress_host = audience_parsed.netloc or "mcp-api.example.com"
+    effective_ingress_host = ingress_host or audience_parsed.netloc or "mcp-api.example.com"
+    effective_ingress_path = ingress_path or "/"
+    effective_tls_enabled = (
+        ingress_tls_enabled if ingress_tls_enabled is not None else True
+    )
+    tls_enabled_yaml = "true" if effective_tls_enabled else "false"
+    public_url_block = f'  publicUrl: "{public_url}"\n\n' if public_url else ""
 
     # Determine pull policy based on tag type
     # Release tags (v1.0.0, v2.1.0-beta.1) use IfNotPresent
@@ -1075,7 +1094,7 @@ oidc:
   # API audience (API identifier created in Auth0)
   audience: "{api_identifier}"
 
-  # Pre-registered Auth0 application client ID
+{public_url_block}  # Pre-registered Auth0 application client ID
   # This is the OAuth client used by FastMCP Auth0Provider
   # to authenticate with Auth0 during authorization code exchange
   clientId: "{server_client_id}"
@@ -1107,11 +1126,11 @@ ingress:
   className: "nginx"
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt"
-  host: {ingress_host}
-  path: /
+  host: {effective_ingress_host}
+  path: {effective_ingress_path}
   pathType: Prefix
   tls:
-    enabled: true
+    enabled: {tls_enabled_yaml}
     # secretName auto-generated as: <release-name>-tls
     # Override only if you need a custom name
 
@@ -1222,6 +1241,8 @@ Examples:
                        help="Skip saving configuration to auth0-config.json")
     parser.add_argument("--yes", "-y", action="store_true",
                        help="Skip confirmation prompt")
+    parser.add_argument("--fix", action="store_true",
+                       help="Interactively reconcile drift between mcp-project.yaml and auth0-config.json (TTY only)")
 
     args = parser.parse_args()
     
@@ -1230,16 +1251,37 @@ Examples:
     print("=" * 70)
     
     config_mgr = ConfigManager(args.config_file)
-    
+
+    # Load mcp-project.yaml defaults (CWD-only). Project file feeds
+    # domain / api_identifier; the management token is NEVER read from yaml.
+    project = load_project_defaults()
+    for warning in project.warnings:
+        print(f"⚠️  {warning}")
+    if project.loaded:
+        print(f"📄 Loaded project defaults from {project.source_path}")
+
+    # Reconcile mcp-project.yaml with saved auth0 artifacts. Auto-adds
+    # missing fields; conflicts prompt under --fix.
+    if config_mgr.config:
+        reconcile_from_command(
+            config_mgr.config, args.config_file, fix=args.fix
+        )
+
     # Get deployment name first so we can use it for API name default
     deployment_name = config_mgr.get_value('deployment_name', args.deployment_name, 'DEPLOYMENT_NAME', 'CNPG MCP')
 
     config = {
-        'domain': config_mgr.get_value('domain', args.domain, 'AUTH0_DOMAIN'),
+        'domain': config_mgr.get_value(
+            'domain', args.domain, 'AUTH0_DOMAIN',
+            project_value=project.auth0_domain,
+        ),
         'token': config_mgr.get_value('token', args.token, 'AUTH0_MGMT_TOKEN'),
         'deployment_name': deployment_name,
         'api_name': config_mgr.get_value('api_name', args.api_name, 'AUTH0_API_NAME', f'{deployment_name} - API'),
-        'api_identifier': config_mgr.get_value('api_identifier', args.api_identifier, 'AUTH0_API_IDENTIFIER') or config_mgr.config.get('audience'),
+        'api_identifier': config_mgr.get_value(
+            'api_identifier', args.api_identifier, 'AUTH0_API_IDENTIFIER',
+            project_value=project.auth0_api_identifier or project.audience,
+        ) or config_mgr.config.get('audience'),
         'connection_id': config_mgr.get_value('connection_id', args.connection_id, 'AUTH0_CONNECTION_ID'),
         'client_secret': config_mgr.get_value('client_secret', None, 'AUTH0_MGMT_CLIENT_SECRET')
     }
@@ -1332,7 +1374,11 @@ Examples:
                 connection_id=config_mgr.config.get('connection_id', ''),
                 output_dir=args.output_dir,
                 save_config=False,  # Don't overwrite config file - preserve existing secrets
-                use_dcr=config_mgr.config.get('dcr_enabled', False)  # From saved config
+                use_dcr=config_mgr.config.get('dcr_enabled', False),  # From saved config
+                ingress_host=project.ingress_host,
+                ingress_path=project.ingress_path,
+                ingress_tls_enabled=project.ingress_tls_enabled,
+                public_url=project.public_url,
             )
             print(f"\n✅ Values file regenerated from config")
             sys.exit(0)
@@ -1463,7 +1509,11 @@ Examples:
             connection_id=connection_id,
             output_dir=args.output_dir,
             save_config=False,  # Don't save config here - will be saved with secret preservation logic below
-            use_dcr=args.use_dcr
+            use_dcr=args.use_dcr,
+            ingress_host=project.ingress_host,
+            ingress_path=project.ingress_path,
+            ingress_tls_enabled=project.ingress_tls_enabled,
+            public_url=project.public_url,
         )
         
         if args.save_config:

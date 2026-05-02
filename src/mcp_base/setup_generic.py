@@ -33,8 +33,15 @@ import json
 import argparse
 import requests
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
+
+from mcp_base.project_config import (
+    ProjectDefaults,
+    load_project_defaults,
+    resolve,
+)
+from mcp_base.drift import reconcile_from_command
 
 
 DEFAULT_CONFIG_FILE = "oidc-config.json"
@@ -185,7 +192,12 @@ class GenericOIDCSetup:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         provider_name: str = "generic",
-        validate: bool = True
+        validate: bool = True,
+        required_scopes: Optional[List[str]] = None,
+        ingress_host: Optional[str] = None,
+        ingress_path: Optional[str] = None,
+        ingress_tls_enabled: Optional[bool] = None,
+        public_url: Optional[str] = None,
     ) -> None:
         """
         Setup generic OIDC configuration.
@@ -197,6 +209,11 @@ class GenericOIDCSetup:
             client_secret: OAuth client secret (Pattern A only; ignored for Keycloak)
             provider_name: Provider name (generic, dex, keycloak, etc.)
             validate: Whether to validate the issuer
+            required_scopes: Optional override for oidc.requiredScopes. Used
+                verbatim — ``openid`` is NOT auto-injected.
+            ingress_host, ingress_path, ingress_tls_enabled, public_url:
+                Optional overrides sourced from mcp-project.yaml's
+                ``publicEndpoint`` block.
         """
         pattern = pattern_for_provider(provider_name)
         print(f"\n🔧 Setting up {provider_name.upper()} OIDC provider for MCP (pattern: {pattern})")
@@ -247,7 +264,15 @@ class GenericOIDCSetup:
         self.save_config(config)
 
         # Generate Helm values file
-        self.generate_helm_values(config, audience)
+        self.generate_helm_values(
+            config,
+            audience,
+            required_scopes=required_scopes,
+            ingress_host=ingress_host,
+            ingress_path=ingress_path,
+            ingress_tls_enabled=ingress_tls_enabled,
+            public_url=public_url,
+        )
 
         print("\n✅ Setup complete!")
         print(f"\nNext steps:")
@@ -262,12 +287,25 @@ class GenericOIDCSetup:
             print(f"3. Deploy using Helm:")
             print(f"   helm install mcp-server ./chart -f oidc-values.yaml")
 
-    def generate_helm_values(self, config: Dict[str, Any], audience: str) -> None:
+    def generate_helm_values(
+        self,
+        config: Dict[str, Any],
+        audience: str,
+        required_scopes: Optional[List[str]] = None,
+        ingress_host: Optional[str] = None,
+        ingress_path: Optional[str] = None,
+        ingress_tls_enabled: Optional[bool] = None,
+        public_url: Optional[str] = None,
+    ) -> None:
         """Generate Helm values file for deployment.
 
         Shape follows imp/cli-integration-contract.md §4. oidc.authType, redis.enabled,
         and jwt.enabled are always emitted explicitly so the chart can branch on pattern
         without relying on defaults.
+
+        ``required_scopes`` and the ``ingress_*`` / ``public_url`` overrides come
+        from ``mcp-project.yaml`` when present; falsy values keep the existing
+        example defaults so unset projects don't regress.
         """
         issuer = config["issuer"]
         provider_name = config.get("provider", "generic")
@@ -277,14 +315,33 @@ class GenericOIDCSetup:
         server_client = config.get("server_client", {}) if is_proxy else {}
         client_id = server_client.get("client_id", "")
 
-        # Extract hostname from audience URL for ingress
+        # Extract hostname from audience URL for ingress; project file overrides.
         parsed = urlparse(audience)
-        ingress_host = parsed.netloc or "mcp-api.example.com"
+        effective_ingress_host = ingress_host or parsed.netloc or "mcp-api.example.com"
+        effective_ingress_path = ingress_path or "/"
+        effective_tls_enabled = (
+            ingress_tls_enabled if ingress_tls_enabled is not None else True
+        )
+
+        public_url_block = ""
+        if public_url:
+            public_url_block = f'  publicUrl: "{public_url}"\n\n'
+
+        # Pattern A defaults: don't emit requiredScopes unless the project says so.
+        # Pattern B default: ["openid", "mcp-scope"] — kept for backward compat
+        # with the audience-mapper-based DCR flow when no project file is present.
+        if required_scopes is not None:
+            scopes_yaml = "[" + ", ".join(f'"{s}"' for s in required_scopes) + "]"
+        else:
+            scopes_yaml = None
 
         if is_proxy:
+            scopes_line = ""
+            if scopes_yaml is not None:
+                scopes_line = f"\n  # Required OAuth scopes (from mcp-project.yaml)\n  requiredScopes: {scopes_yaml}\n"
             pattern_block = f"""  # OAuth client ID for MCP server (Pattern A — OAuth Proxy)
   clientId: "{client_id}"
-
+{scopes_line}
   # NOTE: Client secret is automatically loaded from Kubernetes secret
   #   Secret name: <release-name>-oidc-credentials
   #   Secret key: server-client-secret
@@ -295,13 +352,15 @@ class GenericOIDCSetup:
   # jwksUri: "{issuer}/.well-known/jwks.json"
 """
         else:
-            pattern_block = """  # Pattern B — FastMCP's KeycloakAuthProvider uses Keycloak native DCR.
+            effective_scopes = scopes_yaml or '["openid", "mcp-scope"]'
+            pattern_block = f"""  # Pattern B — FastMCP's KeycloakAuthProvider uses Keycloak native DCR.
   # No pre-registered client, no client secret, no Kubernetes credentials secret.
-  requiredScopes: ["openid", "mcp-scope"]
+  requiredScopes: {effective_scopes}
 """
 
         redis_enabled = "true" if is_proxy else "false"
         jwt_enabled = "true" if is_proxy else "false"
+        tls_enabled = "true" if effective_tls_enabled else "false"
 
         helm_values = f"""# Helm Values for MCP Server with {provider_name.upper()} OIDC
 # Generated by mcp-base setup-oidc --provider {provider_name}
@@ -328,7 +387,7 @@ oidc:
   # API audience (identifier)
   audience: "{audience}"
 
-{pattern_block}
+{public_url_block}{pattern_block}
 # Redis subchart — required for Pattern A OAuth session persistence;
 # MUST be disabled for Pattern B (Keycloak native DCR).
 redis:
@@ -348,11 +407,11 @@ ingress:
   className: "nginx"
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt"
-  host: {ingress_host}
-  path: /
+  host: {effective_ingress_host}
+  path: {effective_ingress_path}
   pathType: Prefix
   tls:
-    enabled: true
+    enabled: {tls_enabled}
     # secretName auto-generated as: <release-name>-tls
 
 # Resource limits
@@ -509,30 +568,53 @@ Required Redirect URLs (configure in your IdP):
         help="Skip OIDC issuer validation"
     )
 
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Interactively reconcile drift between mcp-project.yaml and the saved config (TTY only)"
+    )
+
     args = parser.parse_args()
+
+    # Load mcp-project.yaml defaults (CWD-only, never raises). Precedence:
+    # CLI flag > env var > mcp-project.yaml > saved oidc-config.json > prompt.
+    project = load_project_defaults()
+    for warning in project.warnings:
+        print(f"⚠️  {warning}")
+    if project.loaded:
+        print(f"📄 Loaded project defaults from {project.source_path}")
 
     # Initialize setup
     setup = GenericOIDCSetup(config_file=args.config_file)
 
-    # Get configuration values (CLI args > env vars > existing config > prompt)
     print("\n🔧 Generic OIDC Provider Configuration")
     print("=" * 70)
 
     existing_config = setup.config
     server_client = existing_config.get("server_client", {})
 
-    issuer = args.issuer or get_env_or_prompt(
+    # Reconcile mcp-project.yaml with saved artifacts. Auto-adds fields that
+    # are missing in the project file; conflicts prompt under --fix. Without
+    # --fix this is print-only.
+    if existing_config:
+        reconcile_from_command(existing_config, args.config_file, fix=args.fix)
+
+    issuer = resolve(
+        args.issuer, "OIDC_ISSUER", project.issuer, existing_config.get("issuer")
+    ) or get_env_or_prompt(
         "OIDC_ISSUER",
         "OIDC Issuer URL (e.g., https://dex.example.com)",
         required=True,
-        existing_value=existing_config.get("issuer")
+        existing_value=existing_config.get("issuer"),
     )
 
-    audience = args.audience or get_env_or_prompt(
+    audience = resolve(
+        args.audience, "OIDC_AUDIENCE", project.audience, existing_config.get("audience")
+    ) or get_env_or_prompt(
         "OIDC_AUDIENCE",
         "API Audience/Identifier (e.g., https://mcp-server.example.com/mcp)",
         required=True,
-        existing_value=existing_config.get("audience")
+        existing_value=existing_config.get("audience"),
     )
 
     pattern = pattern_for_provider(args.provider_name)
@@ -541,6 +623,8 @@ Required Redirect URLs (configure in your IdP):
     client_secret: Optional[str] = None
 
     if pattern == "proxy":
+        # Project file does NOT carry client credentials (secrets must not live
+        # in a checked-in YAML); fall through env/saved/prompt as before.
         client_id = args.client_id or get_env_or_prompt(
             "OIDC_CLIENT_ID",
             "OAuth Client ID",
@@ -572,7 +656,12 @@ Required Redirect URLs (configure in your IdP):
         client_id=client_id,
         client_secret=client_secret,
         provider_name=args.provider_name,
-        validate=not args.skip_validation
+        validate=not args.skip_validation,
+        required_scopes=project.required_scopes,
+        ingress_host=project.ingress_host,
+        ingress_path=project.ingress_path,
+        ingress_tls_enabled=project.ingress_tls_enabled,
+        public_url=project.public_url,
     )
 
 
