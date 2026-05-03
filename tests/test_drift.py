@@ -8,10 +8,18 @@ from typing import Any, Dict
 import pytest
 
 from mcp_base.drift import (
+    ArgDrift,
     Proposal,
+    ValuesProposal,
     compute_proposals,
+    compute_values_drift,
+    detect_arg_drift,
+    reconcile_args,
     reconcile_project,
 )
+from mcp_base.project_config import ProjectDefaults
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 
 # ---- compute_proposals -----------------------------------------------------
@@ -235,7 +243,8 @@ def test_reconcile_conflict_prompt_yes_overwrites(
         "  issuer: https://kc.OLD.example.com/realms/r\n"
         "  audience: https://mcp.example.com/mcp\n",
     )
-    monkeypatch.setattr("sys.stdin", io.StringIO("y\n"))
+    # "2" picks the saved value (the second column) as the winner.
+    monkeypatch.setattr("sys.stdin", io.StringIO("2\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
     reconcile_project(
@@ -264,7 +273,8 @@ def test_reconcile_conflict_prompt_no_keeps_project(
         "  issuer: https://kc.OLD.example.com/realms/r\n"
         "  audience: https://mcp.example.com/mcp\n",
     )
-    monkeypatch.setattr("sys.stdin", io.StringIO("n\n"))
+    # "1" keeps mcp-project.yaml as-is (first column wins).
+    monkeypatch.setattr("sys.stdin", io.StringIO("1\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
     reconcile_project(
@@ -324,3 +334,389 @@ def test_reconcile_fix_without_changes_is_noop(tmp_path: Path) -> None:
         fix=True,
     )
     assert project.read_text() == before
+
+
+# ---- compute_values_drift: project → oidc-values --------------------------
+
+def _doc(yaml_text: str) -> CommentedMap:
+    """Helper: parse a small YAML string into a CommentedMap."""
+    yaml = YAML()
+    return yaml.load(yaml_text) or CommentedMap()
+
+
+def test_image_drift_against_placeholder_is_auto() -> None:
+    """Project says wateim/foo, values has the placeholder → auto-apply."""
+    project = ProjectDefaults(
+        image_repository="wateim/mcp-base-server",
+        image_tag="latest",
+        source_path="mcp-project.yaml",
+    )
+    values = {
+        "image": {
+            "repository": "your-registry.example.com/mcp-server",
+            "tag": "",
+        }
+    }
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    by_path = {tuple(d.path): d for d in drift}
+    assert by_path[("image", "repository")].kind == "auto"
+    assert by_path[("image", "repository")].proposed == "wateim/mcp-base-server"
+    assert by_path[("image", "tag")].kind == "auto"
+
+
+def test_image_drift_against_real_value_is_conflict() -> None:
+    """Project says wateim/foo, values has someone-else/bar → conflict (prompt)."""
+    project = ProjectDefaults(
+        image_repository="wateim/mcp-base-server",
+        image_tag="v1.0.0",
+        source_path="mcp-project.yaml",
+    )
+    values = {
+        "image": {
+            "repository": "different-registry/another-image",
+            "tag": "v0.9.0",
+        }
+    }
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    kinds = {tuple(d.path): d.kind for d in drift}
+    assert kinds[("image", "repository")] == "conflict"
+    assert kinds[("image", "tag")] == "conflict"
+
+
+def test_image_drift_match_emits_no_entry() -> None:
+    project = ProjectDefaults(
+        image_repository="wateim/mcp-base-server",
+        image_tag="latest",
+        source_path="mcp-project.yaml",
+    )
+    values = {
+        "image": {"repository": "wateim/mcp-base-server", "tag": "latest"}
+    }
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    assert drift == []
+
+
+def test_ingress_drift_skipped_when_publicEndpoint_absent() -> None:
+    """Project has no publicEndpoint block → don't second-guess values ingress."""
+    project = ProjectDefaults(
+        ingress_host="mcp.example.com",
+        ingress_tls_enabled=True,
+        public_url="https://mcp.example.com",
+        source_path="mcp-project.yaml",
+    )
+    values = {"ingress": {"host": "different.example.com"}}
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    paths = [tuple(d.path) for d in drift]
+    assert ("ingress", "host") not in paths
+
+
+def test_ingress_drift_emitted_when_publicEndpoint_present() -> None:
+    project = ProjectDefaults(
+        ingress_host="mcp.example.com",
+        ingress_path="/",
+        ingress_tls_enabled=True,
+        public_url="https://mcp.example.com",
+        source_path="mcp-project.yaml",
+    )
+    values = {
+        "ingress": {
+            "host": "mcp-api.example.com",  # placeholder
+            "tls": {"enabled": True},
+            "path": "/",
+        },
+        "oidc": {"publicUrl": ""},
+    }
+    project_doc = _doc("publicEndpoint:\n  host: mcp.example.com\n")
+    drift = compute_values_drift(project, values, project_doc)
+    by_path = {tuple(d.path): d for d in drift}
+    assert by_path[("ingress", "host")].kind == "auto"
+    assert by_path[("oidc", "publicUrl")].kind == "auto"
+
+
+# ---- reconcile_project: values-side drift ---------------------------------
+
+def test_reconcile_fix_applies_image_drift_to_oidc_values(tmp_path: Path) -> None:
+    """--fix should patch oidc-values.yaml when image differs and values is placeholder."""
+    project = _write(
+        tmp_path,
+        "mcp-project.yaml",
+        "build:\n"
+        "  registry: wateim\n"
+        "  imageName: mcp-base-server\n"
+        "  tag: latest\n"
+        "auth:\n"
+        "  type: keycloak\n"
+        "  issuer: https://kc.example.com/realms/r\n"
+        "  audience: https://mcp.example.com/mcp\n",
+    )
+    values = _write(
+        tmp_path,
+        "oidc-values.yaml",
+        "image:\n"
+        "  repository: your-registry.example.com/mcp-server  # placeholder\n"
+        "  tag: \"\"\n"
+        "oidc:\n"
+        "  authType: keycloak\n",
+    )
+    reconcile_project(
+        str(project),
+        {
+            "provider": "keycloak",
+            "issuer": "https://kc.example.com/realms/r",
+            "audience": "https://mcp.example.com/mcp",
+        },
+        oidc_values_path=str(values),
+        fix=True,
+    )
+    text = values.read_text()
+    assert "repository: wateim/mcp-base-server" in text
+    assert 'tag: latest' in text or "tag: 'latest'" in text or 'tag: "latest"' in text
+    # Comment must survive the round-trip
+    assert "# placeholder" in text
+
+
+def test_reconcile_fix_image_conflict_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When values has a real (non-placeholder) image, --fix must prompt."""
+    project = _write(
+        tmp_path,
+        "mcp-project.yaml",
+        "build:\n"
+        "  registry: wateim\n"
+        "  imageName: mcp-base-server\n"
+        "  tag: v2.0.0\n",
+    )
+    values = _write(
+        tmp_path,
+        "oidc-values.yaml",
+        "image:\n"
+        "  repository: someone-else/image\n"
+        "  tag: v1.0.0\n",
+    )
+    # 'a' = apply all conflicts
+    monkeypatch.setattr("sys.stdin", io.StringIO("a\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    reconcile_project(
+        str(project),
+        {
+            "provider": "keycloak",
+            "issuer": "https://kc.example.com/realms/r",
+            "audience": "https://mcp.example.com/mcp",
+        },
+        oidc_values_path=str(values),
+        fix=True,
+    )
+    text = values.read_text()
+    assert "wateim/mcp-base-server" in text
+    assert "someone-else/image" not in text
+
+
+def test_test_sidecar_drift_auto_when_block_absent() -> None:
+    """Project says testSidecar enabled; values has no testSidecar block → auto."""
+    project = ProjectDefaults(
+        test_sidecar_enabled=True,
+        source_path="mcp-project.yaml",
+    )
+    values: Dict[str, Any] = {}  # no testSidecar block at all
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    sidecar = next(d for d in drift if d.path == ["testSidecar", "enabled"])
+    assert sidecar.kind == "auto"
+    assert sidecar.proposed is True
+
+
+def test_test_sidecar_drift_conflict_when_disagrees() -> None:
+    project = ProjectDefaults(
+        test_sidecar_enabled=True,
+        source_path="mcp-project.yaml",
+    )
+    values = {"testSidecar": {"enabled": False}}
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    sidecar = next(d for d in drift if d.path == ["testSidecar", "enabled"])
+    assert sidecar.kind == "conflict"
+
+
+def test_service_type_drift_against_default() -> None:
+    project = ProjectDefaults(service_type="NodePort", source_path="mcp-project.yaml")
+    values = {"service": {"type": "ClusterIP"}}
+    drift = compute_values_drift(project, values, _doc("project:\n  name: x\n"))
+    svc = next(d for d in drift if d.path == ["service", "type"])
+    assert svc.kind == "conflict"
+    assert svc.proposed == "NodePort"
+
+
+def test_reconcile_fix_applies_test_sidecar_drift(tmp_path: Path) -> None:
+    project = _write(
+        tmp_path,
+        "mcp-project.yaml",
+        "deployment:\n  testSidecarEnabled: true\n",
+    )
+    values = _write(
+        tmp_path,
+        "oidc-values.yaml",
+        "image:\n  repository: your-registry.example.com/mcp-server\n  tag: \"\"\n"
+        "service:\n  type: ClusterIP\n",
+    )
+    reconcile_project(
+        str(project),
+        {
+            "provider": "keycloak",
+            "issuer": "https://kc.example.com/realms/r",
+            "audience": "https://mcp.example.com/mcp",
+        },
+        oidc_values_path=str(values),
+        fix=True,
+    )
+    text = values.read_text()
+    assert "testSidecar:" in text
+    assert "enabled: true" in text
+
+
+# ---- args drift -----------------------------------------------------------
+
+def test_detect_arg_drift_namespace() -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude", source_path="mcp-project.yaml"
+    )
+    drift = detect_arg_drift(project, namespace="other-ns")
+    assert len(drift) == 1
+    assert drift[0].flag == "--namespace"
+    assert drift[0].cli_value == "other-ns"
+    assert drift[0].project_value == "claude"
+
+
+def test_detect_arg_drift_match_emits_nothing() -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude",
+        deployment_release_name="mcp-base",
+        project_app_name="mcp-base",
+        source_path="mcp-project.yaml",
+    )
+    assert detect_arg_drift(
+        project, namespace="claude", release_name="mcp-base", app_name="mcp-base"
+    ) == []
+
+
+def test_detect_arg_drift_silent_project_field_skipped() -> None:
+    """If project doesn't define a field, no drift even when CLI passes one."""
+    project = ProjectDefaults(source_path="mcp-project.yaml")
+    assert detect_arg_drift(project, namespace="some-ns", app_name="some-app") == []
+
+
+def test_reconcile_args_no_drift_returns_inputs() -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude", source_path="mcp-project.yaml"
+    )
+    ns, rel, app = reconcile_args(
+        project, namespace="claude", release_name=None, app_name=None, fix=False
+    )
+    assert (ns, rel, app) == ("claude", None, None)
+
+
+def test_reconcile_args_print_only_keeps_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude", source_path="mcp-project.yaml"
+    )
+    ns, _rel, _app = reconcile_args(
+        project, namespace="other-ns", release_name=None, app_name=None, fix=False
+    )
+    out = capsys.readouterr().out
+    assert "CLI args vs mcp-project.yaml" in out
+    assert "deployment.namespace" in out
+    # Without --fix, the CLI value is kept.
+    assert ns == "other-ns"
+
+
+def test_reconcile_args_fix_picks_project_via_choice_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude", source_path="mcp-project.yaml"
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("2\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    ns, _rel, _app = reconcile_args(
+        project, namespace="other-ns", release_name=None, app_name=None, fix=True
+    )
+    assert ns == "claude"
+
+
+def test_reconcile_args_fix_keeps_cli_via_choice_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude", source_path="mcp-project.yaml"
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("1\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    ns, _rel, _app = reconcile_args(
+        project, namespace="other-ns", release_name=None, app_name=None, fix=True
+    )
+    assert ns == "other-ns"
+
+
+def test_reconcile_args_fix_non_tty_keeps_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude", source_path="mcp-project.yaml"
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    ns, _rel, _app = reconcile_args(
+        project, namespace="other-ns", release_name=None, app_name=None, fix=True
+    )
+    out = capsys.readouterr().out
+    assert "not a TTY" in out
+    assert ns == "other-ns"
+
+
+def test_reconcile_args_fix_apply_all_uses_project_for_remaining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = ProjectDefaults(
+        deployment_namespace="claude",
+        deployment_release_name="mcp-base",
+        project_app_name="mcp-base",
+        source_path="mcp-project.yaml",
+    )
+    # First answer 'a' applies project for all remaining drift entries.
+    monkeypatch.setattr("sys.stdin", io.StringIO("a\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    ns, rel, app = reconcile_args(
+        project,
+        namespace="ns-cli", release_name="rel-cli", app_name="app-cli",
+        fix=True,
+    )
+    assert ns == "claude"
+    assert rel == "mcp-base"
+    assert app == "mcp-base"
+
+
+def test_reconcile_print_only_does_not_touch_oidc_values(tmp_path: Path) -> None:
+    project = _write(
+        tmp_path,
+        "mcp-project.yaml",
+        "build:\n"
+        "  registry: wateim\n"
+        "  imageName: mcp-base-server\n",
+    )
+    values = _write(
+        tmp_path,
+        "oidc-values.yaml",
+        "image:\n  repository: your-registry.example.com/mcp-server\n  tag: \"\"\n",
+    )
+    before = values.read_text()
+    reconcile_project(
+        str(project),
+        {
+            "provider": "keycloak",
+            "issuer": "https://kc.example.com/realms/r",
+            "audience": "https://mcp.example.com/mcp",
+        },
+        oidc_values_path=str(values),
+        fix=False,
+    )
+    assert values.read_text() == before

@@ -993,6 +993,10 @@ def save_output_files(
     ingress_path: Optional[str] = None,
     ingress_tls_enabled: Optional[bool] = None,
     public_url: Optional[str] = None,
+    image_repository: Optional[str] = None,
+    image_tag: Optional[str] = None,
+    service_type: Optional[str] = None,
+    test_sidecar_enabled: Optional[bool] = None,
 ) -> None:
     """Save configuration files."""
     print("\n💾 Saving configuration files...")
@@ -1038,12 +1042,16 @@ def save_output_files(
     else:
         print(f"⏭️  Skipping auth0-config.json (preserving existing secrets)")
     
-    # Load make.env to get image repository and tag
+    # Image repository / tag — mcp-project.build overrides make.env which
+    # overrides the placeholder default.
     make_env = load_make_env(output_dir)
-    registry = make_env.get('REGISTRY', 'your-registry.example.com')
-    image_name = make_env.get('IMAGE_NAME', 'mcp-server')
-    image_tag = make_env.get('TAG', '')
-    image_repo = f"{registry}/{image_name}"
+    if image_repository:
+        image_repo = image_repository
+    else:
+        registry = make_env.get('REGISTRY', 'your-registry.example.com')
+        image_name = make_env.get('IMAGE_NAME', 'mcp-server')
+        image_repo = f"{registry}/{image_name}"
+    image_tag = image_tag if image_tag is not None else make_env.get('TAG', '')
 
     # Extract hostname from audience URL for ingress; project file overrides.
     audience_parsed = urlparse(api_identifier)
@@ -1053,6 +1061,14 @@ def save_output_files(
         ingress_tls_enabled if ingress_tls_enabled is not None else True
     )
     tls_enabled_yaml = "true" if effective_tls_enabled else "false"
+    effective_service_type = service_type or "ClusterIP"
+    test_sidecar_block = ""
+    if test_sidecar_enabled is not None:
+        sidecar_yaml = "true" if test_sidecar_enabled else "false"
+        test_sidecar_block = (
+            f"\n# Test sidecar (no-auth test server)\n"
+            f"testSidecar:\n  enabled: {sidecar_yaml}\n"
+        )
     public_url_block = f'  publicUrl: "{public_url}"\n\n' if public_url else ""
 
     # Determine pull policy based on tag type
@@ -1118,7 +1134,8 @@ jwt:
 
 # Service configuration
 service:
-  type: ClusterIP
+  type: {effective_service_type}
+{test_sidecar_block}
 
 # Ingress (configure for external access)
 ingress:
@@ -1379,6 +1396,10 @@ Examples:
                 ingress_path=project.ingress_path,
                 ingress_tls_enabled=project.ingress_tls_enabled,
                 public_url=project.public_url,
+                image_repository=project.image_repository,
+                image_tag=project.image_tag,
+                service_type=project.service_type,
+                test_sidecar_enabled=project.test_sidecar_enabled,
             )
             print(f"\n✅ Values file regenerated from config")
             sys.exit(0)

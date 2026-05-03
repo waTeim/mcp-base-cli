@@ -755,8 +755,8 @@ Requirements:
 
     parser.add_argument(
         "--app-name",
-        default="mcp-server",
-        help="Application name for labels (default: mcp-server)"
+        default=None,
+        help="Application name for labels (default: from mcp-project.yaml project.name, else 'mcp-server')"
     )
 
     parser.add_argument(
@@ -789,12 +789,33 @@ Requirements:
         help="Delete RBAC resources instead of creating them"
     )
 
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Interactively reconcile drift between mcp-project.yaml and CLI args (TTY only)"
+    )
+
     return parser.parse_args()
 
 
 def main():
     """Main entry point."""
     args = parse_args()
+
+    # CLI args ↔ mcp-project.yaml drift. Resolve missing args from project,
+    # then surface disagreements between provided args and project values.
+    from mcp_base.drift import reconcile_args
+    from mcp_base.project_config import load_project_defaults
+    project = load_project_defaults()
+    args.namespace, _release, args.app_name = reconcile_args(
+        project,
+        namespace=args.namespace or project.deployment_namespace,
+        release_name=None,  # setup-rbac doesn't take --release-name
+        app_name=args.app_name or project.project_app_name,
+        fix=args.fix,
+    )
+    if not args.app_name:
+        args.app_name = "mcp-server"
 
     # Determine service account name
     service_account = args.service_account

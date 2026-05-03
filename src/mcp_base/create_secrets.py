@@ -323,13 +323,13 @@ Pattern A Secrets:
     )
     parser.add_argument(
         "--release-name",
-        help="Helm release name (used to generate secret name)",
-        required=True
+        help="Helm release name (default: from mcp-project.yaml deployment.helmRelease)",
+        default=None,
     )
     parser.add_argument(
         "--app-name",
-        help="Application name for labels (default: mcp-server)",
-        default="mcp-server"
+        help="Application name for labels (default: from mcp-project.yaml project.name, else 'mcp-server')",
+        default=None,
     )
     parser.add_argument(
         "--fix",
@@ -365,9 +365,28 @@ Pattern A Secrets:
     # Reconcile mcp-project.yaml with the saved CLI artifacts. Without --fix
     # this is a print-only summary; with --fix, missing fields are auto-added
     # and conflicts prompt for confirmation.
-    from mcp_base.drift import reconcile_from_command
+    from mcp_base.drift import reconcile_args, reconcile_from_command
+    from mcp_base.project_config import load_project_defaults
+
     if preview:
         reconcile_from_command(preview, args.config_file, fix=args.fix)
+
+    # CLI args ↔ project drift. Resolve missing args from project, then surface
+    # disagreements between provided args and project values.
+    project = load_project_defaults()
+    args.namespace, args.release_name, args.app_name = reconcile_args(
+        project,
+        namespace=args.namespace or project.deployment_namespace,
+        release_name=args.release_name or project.deployment_release_name,
+        app_name=args.app_name or project.project_app_name,
+        fix=args.fix,
+    )
+
+    if not args.release_name:
+        print("Error: --release-name is required (or set deployment.helmRelease in mcp-project.yaml)")
+        sys.exit(1)
+    if not args.app_name:
+        args.app_name = "mcp-server"
 
     provider_type = preview.get('provider', 'auth0')
     pattern = preview.get('pattern') or ("remote" if provider_type == "keycloak" else "proxy")

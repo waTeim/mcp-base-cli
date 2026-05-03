@@ -58,6 +58,19 @@ class ProjectDefaults:
     auth0_domain: Optional[str] = None
     auth0_api_identifier: Optional[str] = None
 
+    # build.* derived (canonical for oidc-values.image)
+    image_repository: Optional[str] = None
+    image_tag: Optional[str] = None
+
+    # deployment.* derived (canonical for chart deploy-shape values)
+    service_type: Optional[str] = None
+    test_sidecar_enabled: Optional[bool] = None
+
+    # Identity fields used to fall back / cross-check CLI flags
+    deployment_namespace: Optional[str] = None       # → --namespace
+    deployment_release_name: Optional[str] = None    # → --release-name
+    project_app_name: Optional[str] = None           # → --app-name
+
     # Diagnostics
     source_path: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
@@ -202,6 +215,45 @@ def load_project_defaults(cwd: Optional[str] = None) -> ProjectDefaults:
             defaults.auth0_api_identifier = api_identifier
     elif auth0_block:
         defaults.warnings.append("auth.auth0 must be a mapping; ignoring")
+
+    build_block = raw.get("build") or {}
+    if isinstance(build_block, dict):
+        registry = build_block.get("registry")
+        image_name = build_block.get("imageName")
+        if registry and image_name:
+            defaults.image_repository = f"{registry}/{image_name}"
+        elif image_name:
+            defaults.image_repository = image_name
+        tag = build_block.get("tag")
+        if tag:
+            defaults.image_tag = str(tag)
+    elif build_block:
+        defaults.warnings.append("build must be a mapping; ignoring")
+
+    deployment_block = raw.get("deployment") or {}
+    if isinstance(deployment_block, dict):
+        service_type = deployment_block.get("serviceType")
+        if service_type:
+            defaults.service_type = str(service_type)
+        sidecar = deployment_block.get("testSidecarEnabled")
+        if sidecar is not None:
+            defaults.test_sidecar_enabled = bool(sidecar)
+        ns = deployment_block.get("namespace")
+        if ns:
+            defaults.deployment_namespace = str(ns)
+        release = deployment_block.get("helmRelease")
+        if release:
+            defaults.deployment_release_name = str(release)
+    elif deployment_block:
+        defaults.warnings.append("deployment must be a mapping; ignoring")
+
+    project_block = raw.get("project") or {}
+    if isinstance(project_block, dict):
+        name = project_block.get("name")
+        if name:
+            defaults.project_app_name = str(name)
+    elif project_block:
+        defaults.warnings.append("project must be a mapping; ignoring")
 
     return defaults
 

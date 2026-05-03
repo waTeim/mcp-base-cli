@@ -102,18 +102,40 @@ Mappings:
 When the project file is absent (or omits a field), the CLI falls back to the existing flag/env/prompt flow without changing behavior.
 
 ### Reconciling `mcp-project.yaml` with saved artifacts (`--fix`)
-`mcp-project.yaml` is the intended source of truth, but on existing deployments the CLI artifacts (`oidc-config.json` / `auth0-config.json` / `oidc-values.yaml`) came first. Every subcommand that touches those artifacts compares the project file against them and surfaces drift. The compared fields are the *project file's* counterparts of:
+`mcp-project.yaml` is the intended source of truth, but on existing deployments the CLI artifacts (`oidc-config.json` / `auth0-config.json` / `oidc-values.yaml`) came first. Every subcommand that touches those artifacts compares the project file against them and surfaces drift in two directions:
 
+**Saved → project** (bootstrap fields the project file is missing):
 - `oidc-config.json`: `provider` (→ `auth.type` + optional `auth.providerName`), `issuer`, `audience`
 - `auth0-config.json`: `domain` (→ `auth.auth0.domain`), `audience` (→ `auth.auth0.apiIdentifier` and `auth.audience`)
 - `oidc-values.yaml`: `oidc.requiredScopes` (→ `auth.requiredScopes`), `ingress.host` / `ingress.tls.enabled` / `ingress.path` (→ `publicEndpoint.host` / `scheme` / `path`), with `publicEndpoint.mcpPath` derived from the audience URL path. The CLI's example placeholder host (`mcp-api.example.com`) is never proposed.
 
+**Project → values** (project is canonical for these fields, so a stale `oidc-values.yaml` should match it):
+- `build.{registry,imageName}` → `image.repository`, `build.tag` → `image.tag` (always considered)
+- `deployment.serviceType` → `service.type`, `deployment.testSidecarEnabled` → `testSidecar.enabled` (always considered)
+- `publicEndpoint.{host,path,scheme}` → `ingress.{host,path,tls.enabled}` and `oidc.publicUrl` (only when the project file has a `publicEndpoint:` block — we don't second-guess users who haven't opted into the new schema)
+
+**Project ↔ CLI flags** (`create-secrets`, `setup-rbac`):
+- `deployment.namespace` ↔ `--namespace`, `deployment.helmRelease` ↔ `--release-name`, `project.name` ↔ `--app-name`
+- When a flag is omitted and the project supplies the value, the project value is used silently.
+- When a flag is explicit and disagrees with the project, drift is logged. With `--fix` on a TTY, the user picks the winner per-flag and it's applied for the current run only (the CLI invocation isn't rewritten).
+- `--release-name` is no longer required when `deployment.helmRelease` is set in the project file.
+
 Without `--fix`: print a summary of missing / conflicting fields and continue. **No file is modified.**
 
 With `--fix` (`setup-oidc`, `create-secrets`, `add-user`):
-- Fields **missing** in `mcp-project.yaml` for which a non-default saved value exists are **auto-added** without prompting.
-- Fields **present in both but differing** trigger a per-field prompt (`y` / `n` / `a`ll / `s`kip-all). Non-TTY `--fix` skips the conflict prompts (auto-add still applies).
-- The file is rewritten with `ruamel.yaml`, preserving comments and key order.
+- Project additions (saved → project): missing fields **auto-added**; existing-but-different fields prompt for which side wins.
+- Values updates (project → values): when the values side looks like a placeholder (e.g., `your-registry.example.com/mcp-server`, empty tag, `mcp-api.example.com`, missing block) the change is **auto-applied**; real divergences prompt.
+- Conflict prompts use a numbered winner-pick — `[1]` keeps the file as-is, `[2]` writes the other side in. `[a]` = pick `[2]` for all remaining; `[s]` = pick `[1]` for all remaining. Example:
+  ```
+  • auth.requiredScopes
+      [1] mcp-project.yaml: ['jupyter-mcp']
+      [2] saved config:     ['openid', 'mcp-scope']
+    Which is correct? [1/2/a=all-2/s=skip-all]:
+  ```
+- Non-TTY `--fix` skips conflict prompts (auto-applies still happen).
+- Both files are rewritten with `ruamel.yaml`, preserving comments and key order.
+
+`setup-oidc` also uses `mcp-project.build` and `publicEndpoint` directly when generating a fresh `oidc-values.yaml`, so a post-`--fix` regeneration produces a values file that matches the project from the start.
 
 ### Command contracts
 
@@ -136,7 +158,7 @@ Required: `--namespace`, `--release-name`. Reads `auth0-config.json` or `oidc-co
 Checks `pattern` from the config file **before** touching kubeconfig: `"remote"` (Keycloak) exits `0` immediately with a notice and never contacts the cluster. `"proxy"` creates `<release>-oidc-credentials` (standardized name; the Auth0 path previously used `-auth0-credentials`) and `<release>-jwt-signing-key`.
 
 **`setup-rbac`** (requires `[kubernetes]` extra)
-Required: `--app-name`. Optional: `--namespace`, `--scope {cluster,namespace}` (default `cluster`), `--dry-run`, `--delete`.
+Required: `--app-name` (or `project.name` in `mcp-project.yaml`). Optional: `--namespace` (falls back to `deployment.namespace`), `--scope {cluster,namespace}` (default `cluster`), `--dry-run`, `--delete`, `--fix`.
 
 **`add-user`**
 Required: `--email`, `--client-type {server,test,both}` (`server`=production, `test`=testing). Mutates `auth0-config.json` in CWD.
